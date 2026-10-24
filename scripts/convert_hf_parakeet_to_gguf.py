@@ -21,6 +21,15 @@ so the engine sees ordinary linear weights and needs no new kernel.
 The optional ``vad_head.*`` tensors are written as F32 together with the
 ``parakeet.vad.*`` KVs unless ``--vad drop`` is given. With ``--ternary keep``
 the ternary linears stay packed (see docs/ternary.md) instead of dequantized.
+
+Phonon-2.5 (FermionResearch/Phonon-2.5 and Phonon-2.5-English) ships its weights
+as a ``fermion-five-value-parakeet-v1`` container inside a ``.bps.tar.zst``
+archive instead of safetensors. Pass the archive with ``--fermion`` (and the
+HF ``config.json`` of nvidia/parakeet-tdt-0.6b-v3 with ``--config``). The
+archive SHA-256 is checked against ``SHA256SUMS.txt`` next to it, or against
+``--sha256``, and every member against the manifests inside the archive. The
+five-value, int6 and fp16 records are expanded to float32, and the rest of the
+conversion is the same as for a safetensors checkpoint. See ``scripts/fermion_reader.py``.
 """
 import argparse
 import json
@@ -30,6 +39,9 @@ import struct
 import sys
 
 import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import fermion_reader  # noqa: E402
 
 try:
     import gguf
@@ -132,6 +144,51 @@ def unpack_ternary(q, scales, in_features, group):
     return s * (codes.astype(np.float32) - 1.0)
 
 
+_POINTWISE = re.compile(r"\.conv\.pointwise_conv[12]\.weight$")
+
+
+def read_fermion(args, tkv, tv):
+    """Yield (HF name, float32 array) for every record of a Phonon release.
+
+    Five-value matrices come out as the dense matrix named ``<module>.weight``;
+    the 1x1 convolutions are reshaped to [out, in, 1] like the safetensors export.
+    """
+    rel = fermion_reader.load_release(args.fermion, sums=args.sums, sha256=args.sha256,
+                                      verify=not args.no_verify)
+    check_fermion_config(rel.nemo_config, tkv, tv)
+    for rec in fermion_reader.iter_records(rel.container):
+        arr = fermion_reader.decode_record(rec)
+        name = rec.name + (".weight" if rec.kind == "five_value" else "")
+        if arr.ndim == 2 and _POINTWISE.search(name):
+            arr = arr[:, :, None]
+        yield name, arr
+
+
+def check_fermion_config(nemo, tkv, tv):
+    """Cross-check the NeMo config inside the archive against the template."""
+    if not nemo:
+        return
+    enc, pre = nemo.get("encoder", {}), nemo.get("preprocessor", {})
+    checks = {
+        "parakeet.encoder.d_model": enc.get("d_model"),
+        "parakeet.encoder.n_layers": enc.get("n_layers"),
+        "parakeet.encoder.n_heads": enc.get("n_heads"),
+        "parakeet.encoder.feat_in": enc.get("feat_in"),
+        "parakeet.encoder.conv_kernel": enc.get("conv_kernel_size"),
+        "parakeet.encoder.subsampling_factor": enc.get("subsampling_factor"),
+        "parakeet.preprocessor.n_fft": pre.get("n_fft"),
+    }
+    for k, want in checks.items():
+        if want is not None and k in tv and int(tv[k]) != int(want):
+            sys.exit(f"archive config mismatch vs template: {k} template={tv[k]} archive={want}")
+    if "parakeet.encoder.xscaling" in tv and "xscaling" in enc and bool(tv["parakeet.encoder.xscaling"]) != bool(enc["xscaling"]):
+        sys.exit("archive config mismatch vs template: xscaling")
+    vocab = nemo.get("joint", {}).get("vocabulary")
+    pieces = tkv.get("parakeet.tokenizer.pieces")
+    if vocab and pieces is not None and [str(p) for p in pieces.contents()] != list(vocab):
+        sys.exit("archive vocabulary differs from the template tokenizer; use the template of the same tokenizer")
+
+
 def load_template(path):
     r = gguf.GGUFReader(path)
     kv = {}
@@ -149,7 +206,13 @@ def field_value(f):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--hf", required=True, help="local dir holding model.safetensors + config.json (+ ternary.json)")
+    ap.add_argument("--hf", help="local dir holding model.safetensors + config.json (+ ternary.json)")
+    ap.add_argument("--fermion", help="Phonon-2.5 release (.bps.tar.zst, an unpacked directory or a bare model.fermion) "
+                    "instead of --hf; needs --config")
+    ap.add_argument("--config", help="HF config.json of nvidia/parakeet-tdt-0.6b-v3 (default: <--hf>/config.json)")
+    ap.add_argument("--sums", help="SHA256SUMS.txt that lists the --fermion archive (default: the one next to it)")
+    ap.add_argument("--sha256", help="expected SHA-256 of the --fermion archive, instead of --sums")
+    ap.add_argument("--no-verify", action="store_true", help="skip the --fermion checksum checks")
     ap.add_argument("--template", required=True,
                     help="GGUF of nvidia/parakeet-tdt-0.6b-v3 from convert_parakeet_to_gguf.py (KV, vocab, mel buffers)")
     ap.add_argument("--output", required=True)
@@ -161,10 +224,19 @@ def main():
                     help="keep the vad_head.* tensors and parakeet.vad.* KVs when the checkpoint has them")
     args = ap.parse_args()
 
-    src = pathlib.Path(args.hf)
-    cfg = json.load(open(src / "config.json"))
-    tern_path = src / "ternary.json"
-    tern = json.load(open(tern_path)) if tern_path.exists() else None
+    if bool(args.hf) == bool(args.fermion):
+        sys.exit("give exactly one of --hf and --fermion")
+    if args.fermion:
+        if not args.config:
+            sys.exit("--fermion needs --config (the HF config.json of nvidia/parakeet-tdt-0.6b-v3)")
+        src = pathlib.Path(args.fermion)
+        cfg = json.load(open(args.config))
+        tern = None
+    else:
+        src = pathlib.Path(args.hf)
+        cfg = json.load(open(args.config or src / "config.json"))
+        tern_path = src / "ternary.json"
+        tern = json.load(open(tern_path)) if tern_path.exists() else None
 
     _, tkv, ttensors = load_template(args.template)
     tv = {k: field_value(f) for k, f in tkv.items() if "pieces" not in k}
@@ -193,7 +265,7 @@ def main():
 
     # --- KV: copy the template, HF checkpoints are TDT-only (no CTC head) ----
     w = gguf.GGUFWriter(args.output, "parakeet")
-    w.add_string("general.name", args.name or src.name)
+    w.add_string("general.name", args.name or (src.name.split(".")[0] if args.fermion else src.name))
     for k, f in tkv.items():
         if k in ("general.architecture", "general.name", "general.quantization_version",
                  "general.file_type"):
@@ -214,7 +286,14 @@ def main():
     qmods = {m["name"]: m for m in (tern["quantized_modules"] if tern else [])}
     group = (tern or {}).get("quant", {}).get("group_size", 0)
     pending_q = {}
-    for name, arr in read_safetensors(src / "model.safetensors"):
+    if args.fermion:
+        try:
+            tensor_stream = read_fermion(args, tkv, tv)
+        except fermion_reader.FermionError as e:
+            sys.exit(f"fermion: {e}")
+    else:
+        tensor_stream = read_safetensors(src / "model.safetensors")
+    for name, arr in tensor_stream:
         if arr.ndim == 0:
             continue
         if _VAD.match(name):

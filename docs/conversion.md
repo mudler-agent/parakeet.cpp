@@ -180,6 +180,9 @@ HF tensor names are mapped back to the verbatim NeMo names described below.
 | `--name NAME` | `general.name` (default: the `--hf` directory name) |
 | `--ternary dequant\|keep` | `dequant` (default) expands ternary weights to ordinary ones. `keep` stores them packed, see `docs/ternary.md` |
 | `--vad keep\|drop` | keep (default) or drop the `vad_head.*` tensors and `parakeet.vad.*` KVs when the checkpoint has them |
+| `--fermion RELEASE` | instead of `--hf`: a Phonon-2.5 release (`.bps.tar.zst`, an unpacked directory or a bare `model.fermion`), see `docs/phonon.md` |
+| `--config JSON` | the transformers `config.json` of `nvidia/parakeet-tdt-0.6b-v3`. Needed with `--fermion`; with `--hf` it overrides `<hf>/config.json` |
+| `--sums FILE`, `--sha256 HEX`, `--no-verify` | `--fermion` only: where the archive checksum comes from (default: `SHA256SUMS.txt` next to the archive), or skip the checks |
 
 Extra GGUF content written by this converter:
 

@@ -53,6 +53,11 @@ struct TernaryCfg {
     bool present = false;
     uint32_t group_size = 128;   // scales are per (row, 128 columns)
 };
+// Five-value encoder linears (Phonon-2.5): two ternary planes per linear, see
+// ternary.hpp. present=false for every other model.
+struct FiveValueCfg {
+    bool present = false;
+};
 // Voice-activity head on the subsampler output (moondream ultra/redux).
 struct VadCfg {
     bool present = false;
@@ -77,6 +82,7 @@ struct ParakeetConfig {
     StreamingCfg streaming;
     PromptCfg prompt;       // prompt conditioning (present=false for non-prompt)
     TernaryCfg ternary;     // present=false unless parakeet.ternary.present
+    FiveValueCfg fivevalue; // present=false unless parakeet.fivevalue.present
     VadCfg vad;             // present=false unless parakeet.vad.present
     // preprocessor
     uint32_t sample_rate=16000, n_mels=0, n_fft=0, win_length=0, hop_length=0;

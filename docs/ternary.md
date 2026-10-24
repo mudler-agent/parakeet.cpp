@@ -224,6 +224,59 @@ Transcripts on `tests/fixtures/speech.wav` are identical across the scalar,
 avx2 and vnni kernels and the dequantized F16 and Q8_0 Redux, and equal the
 reference transcript in `AGENTS.md`.
 
+## Five-value encoders (Phonon-2.5)
+
+Phonon-2.5 (see [phonon.md](phonon.md)) stores the same 264 encoder linears as Redux, but each
+weight is 0, plus or minus `lo[row]`, or plus or minus `hi[row]`: two scales per output row instead
+of one per group of 128 columns, and one flag bit per nonzero weight that picks between them.
+Every such matrix is `W = lo * A + hi * B`, where A and B are ternary matrices that never share a
+nonzero position. That is two ternary matrices, so the Redux kernels can run it.
+
+### GGUF form
+
+`convert_hf_parakeet_to_gguf.py --fermion ... --five-value keep` writes the upstream bytes
+unchanged. For each linear `<base>` the file holds:
+
+| Tensor | Type | Content |
+|---|---|---|
+| `<base>.fvcodes` | I8 | N rows of ceil(K/5) bytes of trits, as in `qweight` (digit 1 is a zero weight) |
+| `<base>.fvhi` | I8 | ceil(nnz/8) bytes, one bit per nonzero weight in row-major order, least significant bit first; 1 selects `hi` |
+| `<base>.fvscale` | F16 | shape [N, 2]: `lo[N]` followed by `hi[N]` |
+
+and no `<base>.weight`. The KV `parakeet.fivevalue.present` (bool) marks the file; the loader reads
+it into `ParakeetConfig::fivevalue`. The other tensors are ordinary (F32, or F16 for the three
+allowlisted linears with `--dtype f16`). A file without the flag loads exactly as before.
+
+### Runtime path
+
+1. Load: `ternary_prepare` validates the three tensors of every linear against the shape the
+   model config demands, then splits each matrix into two `TernaryWeight` planes. Plane A holds
+   the weights whose flag is 0 with the scale `lo`, plane B those whose flag is 1 with the scale
+   `hi`; the row scale is repeated for every group of 128 columns. The split reuses the Redux
+   repack, so the planes have the kernel layout described above, and runs on the same thread pool
+   (`PARAKEET_REPACK_THREADS`). A flag stream whose length does not match the number of nonzero
+   trits, a trit byte of 243 or more and a scale that is not finite are refused at load.
+2. Run: the activations of a linear are quantized to int8 once (the same op as Redux), both planes
+   run on those bytes, and the two outputs are added. The kernels and their selection are those
+   of the Redux path (`PARAKEET_TERNARY_KERNEL`).
+3. The result is not bit-identical to the dequantized file: it carries the same int8
+   activation quantization as Redux. The reference for this engine is the dequantized file; the
+   packed file is checked against it by transcripts.
+
+Limits are those of Redux: CPU only, offline only (`StreamingEncoder` refuses the file), the
+original bytes stay resident next to the repacked planes (4 bits per weight for the two planes, on top
+of the about 2.1 bits per weight of the file), and `parakeet-cli quantize` copies the three tensors unchanged.
+The scalar kernel is selected on MSVC builds, Windows on ARM and aarch64 without dotprod; use a
+dequantized file there.
+
+`tests/test_fivevalue.cpp` checks, without a model, that `lo * A + hi * B` equals the dequantized
+weights bit for bit for random matrices (including a row length that is not a multiple of 5, N that
+is not a multiple of 16, no hi weights, only hi weights, no nonzero weights), that the planes never
+overlap, and that the two-plane product with the quantized activations equals the float product
+of the dequantized weights. `tests/test_fivevalue_model.cpp` (`PARAKEET_TEST_GGUF_PHONON_KEEP`,
+`PARAKEET_TEST_GGUF_PHONON_DEQ`) requires the same transcripts from the packed and the dequantized
+file on the test clips, and batch equal to per-item.
+
 ## VAD head wiring
 
 Ultra and Redux carry a small voice-activity head (`vad_head.proj`, `vad_head.ctx`, `vad_head.out`) on the
@@ -764,4 +817,10 @@ PARAKEET_TEST_GGUF_REDUX_DEQ=<redux --ternary dequant gguf> \
     ctest --test-dir build -R test_ternary_model --output-on-failure
 
 build/tests/bench_ternary [N K T reps]                        # single thread: each kernel, the quantizer, ggml Q8_0 and F16 mul_mat
+
+ctest --test-dir build -R test_fivevalue$ --output-on-failure  # five-value split, no model needed
+
+PARAKEET_TEST_GGUF_PHONON_KEEP=<phonon --five-value keep gguf> \
+PARAKEET_TEST_GGUF_PHONON_DEQ=<phonon dequantized f16 gguf> \
+    ctest --test-dir build -R test_fivevalue_model --output-on-failure
 ```

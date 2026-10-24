@@ -263,6 +263,7 @@ bool ModelLoader::parse_config(const KvView& kv){
             return false;
         }
     }
+    cfg_.fivevalue.present = kv_bool(kv, "parakeet.fivevalue.present", false);
     cfg_.vad.present = kv_bool(kv, "parakeet.vad.present", false);
     if(cfg_.vad.present){
         cfg_.vad.d_in      = kv_u32(kv, "parakeet.vad.d_in", 0);

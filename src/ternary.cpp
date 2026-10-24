@@ -46,15 +46,40 @@ const TritTable& trit_table() {
 
 }  // namespace
 
+namespace {
+
+// Writes the codes of one row (K digits, followed by at least 8 spare bytes) into
+// the kernel layout of row n. Shared by the upstream byte repack and the five-value split.
+void repack_row_codes(const uint8_t* row, int n, int G, TernaryWeight& out) {
+    const int b = n / kTernaryRowBlock, i = n % kTernaryRowBlock;
+    for (int g = 0; g < G; ++g) {
+        const uint8_t* src = row + (size_t)g * kTernaryGroup;
+        uint8_t* dst = out.planes.data() + ((size_t)b * G + g) * 512 + 4 * i;
+        // step st, byte j: the four codes at 16*st + 4*p + j, p = 0..3, in bit pairs
+        for (int st = 0; st < 8; ++st) {
+            const uint8_t* e = src + st * 16;
+            for (int j = 0; j < 4; ++j)
+                dst[st * 64 + j] = (uint8_t)(e[j] | (e[4 + j] << 2) | (e[8 + j] << 4) | (e[12 + j] << 6));
+        }
+    }
+}
+
+void alloc_weight(TernaryWeight& out, int N, int K) {
+    out.N = N;
+    out.K = K;
+    const int G = K / kTernaryGroup;
+    const int B = out.row_blocks();
+    out.planes.assign((size_t)B * G * 512, 0);
+    out.scales.assign((size_t)B * G * kTernaryRowBlock, 0.0f);
+}
+
+}  // namespace
+
 void ternary_repack(const uint8_t* q, const uint16_t* s, int N, int K, TernaryWeight& out) {
     GGML_ASSERT(K > 0 && K % kTernaryGroup == 0);
     const int G = K / kTernaryGroup;
     const int nb = (K + 4) / 5;
-    out.N = N;
-    out.K = K;
-    const int B = out.row_blocks();
-    out.planes.assign((size_t)B * G * 512, 0);
-    out.scales.assign((size_t)B * G * kTernaryRowBlock, 0.0f);
+    alloc_weight(out, N, K);
     const TritTable& tab = trit_table();
     // 5 spare bytes: the last upstream byte may hold digits past K, written and ignored
     std::vector<uint8_t> row((size_t)K + 8);
@@ -73,14 +98,79 @@ void ternary_repack(const uint8_t* q, const uint16_t* s, int N, int K, TernaryWe
         if (bad >= 243)
             throw std::runtime_error("packed byte " + std::to_string((int)bad) + " in row " + std::to_string(n) +
                                      " is not valid (must be below 243 = 3^5)");
+        repack_row_codes(row.data(), n, G, out);
+    }
+}
+
+void fivevalue_split(const uint8_t* codes, const uint8_t* hibits, size_t hibits_bytes,
+                     const uint16_t* lo_f16, const uint16_t* hi_f16, int N, int K,
+                     TernaryWeight& plane_lo, TernaryWeight& plane_hi) {
+    GGML_ASSERT(K > 0 && K % kTernaryGroup == 0);
+    const int G = K / kTernaryGroup;
+    const int nb = (K + 4) / 5;
+    alloc_weight(plane_lo, N, K);
+    alloc_weight(plane_hi, N, K);
+    const TritTable& tab = trit_table();
+    std::vector<uint8_t> row((size_t)K + 8), a((size_t)K + 8, 1), b((size_t)K + 8, 1);
+    uint64_t bitpos = 0;
+    const uint64_t nbits = (uint64_t)hibits_bytes * 8;
+    for (int n = 0; n < N; ++n) {
+        const int blk = n / kTernaryRowBlock, i = n % kTernaryRowBlock;
+        const float lo = ggml_fp16_to_fp32(lo_f16[n]), hi = ggml_fp16_to_fp32(hi_f16[n]);
+        if (!std::isfinite(lo) || !std::isfinite(hi))
+            throw std::runtime_error("scale of row " + std::to_string(n) + " is not finite");
         for (int g = 0; g < G; ++g) {
-            const uint8_t* src = row.data() + (size_t)g * kTernaryGroup;
-            uint8_t* dst = out.planes.data() + ((size_t)b * G + g) * 512 + 4 * i;
-            // step st, byte j: the four codes at 16*st + 4*p + j, p = 0..3, in bit pairs
-            for (int st = 0; st < 8; ++st) {
-                const uint8_t* e = src + st * 16;
-                for (int j = 0; j < 4; ++j)
-                    dst[st * 64 + j] = (uint8_t)(e[j] | (e[4 + j] << 2) | (e[8 + j] << 4) | (e[12 + j] << 6));
+            plane_lo.scales[((size_t)blk * G + g) * kTernaryRowBlock + i] = lo;
+            plane_hi.scales[((size_t)blk * G + g) * kTernaryRowBlock + i] = hi;
+        }
+        const uint8_t* qr = codes + (size_t)n * nb;
+        uint8_t bad = 0;
+        for (int bb = 0; bb < nb; ++bb) {
+            bad = std::max(bad, qr[bb]);
+            std::memcpy(&row[(size_t)bb * 5], tab.d[qr[bb]], 5);
+        }
+        if (bad >= 243)
+            throw std::runtime_error("packed byte " + std::to_string((int)bad) + " in row " + std::to_string(n) +
+                                     " is not valid (must be below 243 = 3^5)");
+        for (int k = 0; k < K; ++k) {
+            const uint8_t c = row[k];
+            if (c == 1) {   // zero weight: no flag bit, zero in both planes
+                a[k] = 1;
+                b[k] = 1;
+                continue;
+            }
+            if (bitpos >= nbits) throw std::runtime_error("hi-flag stream is shorter than the number of nonzero weights");
+            const bool hi_flag = (hibits[bitpos >> 3] >> (bitpos & 7)) & 1;
+            ++bitpos;
+            a[k] = hi_flag ? 1 : c;
+            b[k] = hi_flag ? c : 1;
+        }
+        repack_row_codes(a.data(), n, G, plane_lo);
+        repack_row_codes(b.data(), n, G, plane_hi);
+    }
+    if ((bitpos + 7) / 8 != hibits_bytes)
+        throw std::runtime_error("hi-flag stream has " + std::to_string(hibits_bytes) + " bytes for " +
+                                 std::to_string((unsigned long long)bitpos) + " nonzero weights");
+}
+
+void fivevalue_dequant(const uint8_t* codes, const uint8_t* hibits, size_t hibits_bytes,
+                       const uint16_t* lo_f16, const uint16_t* hi_f16, int N, int K,
+                       std::vector<float>& W) {
+    const int nb = (K + 4) / 5;
+    W.assign((size_t)N * K, 0.0f);
+    uint64_t bitpos = 0;
+    for (int n = 0; n < N; ++n) {
+        const float lo = ggml_fp16_to_fp32(lo_f16[n]), hi = ggml_fp16_to_fp32(hi_f16[n]);
+        for (int bb = 0; bb < nb; ++bb) {
+            int v = codes[(size_t)n * nb + bb];
+            for (int d = 0; d < 5; ++d, v /= 3) {
+                const int k = bb * 5 + d;
+                if (k >= K) continue;
+                const int c = v % 3;
+                if (c == 1) continue;
+                const bool h = bitpos / 8 < hibits_bytes && ((hibits[bitpos >> 3] >> (bitpos & 7)) & 1);
+                ++bitpos;
+                W[(size_t)n * K + k] = (float)(c - 1) * (h ? hi : lo);
             }
         }
     }
@@ -206,9 +296,16 @@ const char* ternary_kernel_name() { return pick_kernel()->name; }
 
 namespace {
 
+// The two planes of one five-value linear: lo holds the weights that use the
+// row's lo scale, hi those that use its hi scale.
+struct FiveValuePair {
+    std::unique_ptr<TernaryWeight> lo, hi;
+};
+
 struct TernaryStore {
     std::mutex mu;
     std::unordered_map<std::string, std::unique_ptr<TernaryWeight>> weights;
+    std::unordered_map<std::string, FiveValuePair> five;
 };
 
 // Validates the packed tensors of one linear before any read of their data.
@@ -248,20 +345,54 @@ TernaryStore& store_of(const ModelLoader& ml) {
     return *static_cast<TernaryStore*>(slot.get());
 }
 
-// Looks the two tensors up and validates them; throws on a malformed pair.
+// Validates the three tensors of one five-value linear before any read of their data.
+void validate_fivevalue_tensors(const ggml_tensor* c, const ggml_tensor* h, const ggml_tensor* sc,
+                                const std::string& base, int64_t expN, int64_t expK) {
+    const std::string who = "five-value: " + base + ": ";
+    if (c->type != GGML_TYPE_I8) throw std::runtime_error(who + "fvcodes is not I8");
+    if (h->type != GGML_TYPE_I8) throw std::runtime_error(who + "fvhi is not I8");
+    if (sc->type != GGML_TYPE_F16) throw std::runtime_error(who + "fvscale is not F16");
+    if (c->ne[2] != 1 || c->ne[3] != 1 || h->ne[1] != 1 || h->ne[2] != 1 || h->ne[3] != 1 ||
+        sc->ne[2] != 1 || sc->ne[3] != 1)
+        throw std::runtime_error(who + "unexpected tensor rank");
+    if (expN < 0 || expK <= 0 || expK % kTernaryGroup != 0)
+        throw std::runtime_error(who + "no valid shape from the model config");
+    const int64_t nb = (expK + 4) / 5;
+    if (c->ne[1] != expN || c->ne[0] != nb)
+        throw std::runtime_error(who + "fvcodes shape does not match the model config (" + std::to_string(expN) +
+                                 "x" + std::to_string(expK) + ")");
+    if (sc->ne[0] != expN || sc->ne[1] != 2)
+        throw std::runtime_error(who + "fvscale must be [N, 2] (lo then hi)");
+    if ((uint64_t)ggml_nbytes(c) != (uint64_t)expN * (uint64_t)nb)
+        throw std::runtime_error(who + "fvcodes byte size mismatch");
+    // one flag bit per nonzero weight: at most N*K bits
+    if ((uint64_t)h->ne[0] > ((uint64_t)expN * (uint64_t)expK + 7) / 8)
+        throw std::runtime_error(who + "fvhi is longer than N*K bits");
+}
+
+// Looks the tensors of one linear up and validates them; throws on a malformed set.
 struct TernaryJob {
     std::string base;
-    const uint8_t* q = nullptr;
-    const uint16_t* s = nullptr;
+    bool five = false;
+    const uint8_t* q = nullptr;     // qweight, or fvcodes
+    const uint16_t* s = nullptr;    // scales, or fvscale (lo[N] then hi[N])
+    const uint8_t* hib = nullptr;   // fvhi
+    size_t hib_bytes = 0;
     int N = 0, K = 0;
-    std::unique_ptr<TernaryWeight> out;
+    std::unique_ptr<TernaryWeight> out, out_hi;
     std::exception_ptr err;
     void run() {
         try {
             out = std::make_unique<TernaryWeight>();
-            ternary_repack(q, s, N, K, *out);
+            if (five) {
+                out_hi = std::make_unique<TernaryWeight>();
+                fivevalue_split(q, hib, hib_bytes, s, s + N, N, K, *out, *out_hi);
+            } else {
+                ternary_repack(q, s, N, K, *out);
+            }
         } catch (const std::exception& e) {
-            err = std::make_exception_ptr(std::runtime_error("ternary: " + base + ": " + e.what()));
+            err = std::make_exception_ptr(std::runtime_error(std::string(five ? "five-value: " : "ternary: ") +
+                                                             base + ": " + e.what()));
         } catch (...) {
             err = std::current_exception();
         }
@@ -282,6 +413,37 @@ TernaryJob make_job(const ModelLoader& ml, const std::string& base, int64_t expN
     return j;
 }
 
+TernaryJob make_five_job(const ModelLoader& ml, const std::string& base, int64_t expN, int64_t expK) {
+    const ggml_tensor* c = ml.tensor(base + ".fvcodes");
+    const ggml_tensor* h = ml.tensor(base + ".fvhi");
+    const ggml_tensor* sc = ml.tensor(base + ".fvscale");
+    if (!c || !h || !sc) throw std::runtime_error("five-value: missing " + base + ".fvcodes/.fvhi/.fvscale");
+    validate_fivevalue_tensors(c, h, sc, base, expN, expK);
+    TernaryJob j;
+    j.base = base;
+    j.five = true;
+    j.q = static_cast<const uint8_t*>(c->data);
+    j.hib = static_cast<const uint8_t*>(h->data);
+    j.hib_bytes = (size_t)h->ne[0];
+    j.s = static_cast<const uint16_t*>(sc->data);
+    j.N = (int)expN;
+    j.K = (int)expK;
+    return j;
+}
+
+// The model's encoder linears, as (name, N, K).
+struct LinearShape { const char* name; int64_t N, K; };
+std::vector<LinearShape> encoder_linears(const ParakeetConfig& cfg) {
+    const int64_t d = cfg.d_model, ff = cfg.ff_dim;
+    return {
+        {"feed_forward1.linear1", ff, d},  {"feed_forward1.linear2", d, ff},
+        {"feed_forward2.linear1", ff, d},  {"feed_forward2.linear2", d, ff},
+        {"self_attn.linear_q", d, d},      {"self_attn.linear_k", d, d},
+        {"self_attn.linear_v", d, d},      {"self_attn.linear_out", d, d},
+        {"self_attn.linear_pos", d, d},    {"conv.pointwise_conv1", 2 * d, d},
+        {"conv.pointwise_conv2", d, d}};
+}
+
 const TernaryWeight& weight_for(const ModelLoader& ml, const std::string& base,
                                 int64_t expN = -1, int64_t expK = -1) {
     TernaryStore& store = store_of(ml);
@@ -292,6 +454,33 @@ const TernaryWeight& weight_for(const ModelLoader& ml, const std::string& base,
     j.run();
     if (j.err) std::rethrow_exception(j.err);
     return *store.weights.emplace(base, std::move(j.out)).first->second;
+}
+
+// Both planes of a five-value linear, split on first use when ternary_prepare did not already.
+const FiveValuePair& five_for(const ModelLoader& ml, const std::string& base) {
+    TernaryStore& store = store_of(ml);
+    std::lock_guard<std::mutex> lk(store.mu);
+    auto it = store.five.find(base);
+    if (it != store.five.end()) return it->second;
+    const ggml_tensor* c = ml.tensor(base + ".fvcodes");
+    const ggml_tensor* sc = ml.tensor(base + ".fvscale");
+    if (!c || !sc) throw std::runtime_error("five-value: missing tensors for " + base);
+    // The shape comes from the model config: the layer name picks the linear.
+    int64_t N = -1, K = -1;
+    for (const LinearShape& l : encoder_linears(ml.config())) {
+        const std::string suffix = std::string(".") + l.name;
+        if (base.size() > suffix.size() && base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            N = l.N;
+            K = l.K;
+        }
+    }
+    TernaryJob j = make_five_job(ml, base, N, K);
+    j.run();
+    if (j.err) std::rethrow_exception(j.err);
+    FiveValuePair p;
+    p.lo = std::move(j.out);
+    p.hi = std::move(j.out_hi);
+    return store.five.emplace(base, std::move(p)).first->second;
 }
 
 // Worker count for the load-time repack: PARAKEET_REPACK_THREADS, else
@@ -336,16 +525,24 @@ std::string ternary_flag_consistency_error(const ModelLoader& ml) {
         return "this GGUF holds packed ternary tensors (.qweight) but parakeet.ternary.present is not set";
     if (flag && !packed)
         return "parakeet.ternary.present is set but the GGUF holds no packed ternary tensors (.qweight)";
+    const bool five = ml.has_tensor_with_suffix(".fvcodes");
+    const bool fflag = ml.config().fivevalue.present;
+    if (five && !fflag)
+        return "this GGUF holds five-value tensors (.fvcodes) but parakeet.fivevalue.present is not set";
+    if (fflag && !five)
+        return "parakeet.fivevalue.present is set but the GGUF holds no five-value tensors (.fvcodes)";
     return "";
 }
 
 bool has_ternary(const ModelLoader& ml, const std::string& base) {
-    return ml.tensor(base + ".qweight") != nullptr;
+    return ml.tensor(base + ".qweight") != nullptr || ml.tensor(base + ".fvcodes") != nullptr;
 }
 
 ggml_tensor* ternary_linear(ggml_context* ctx, const ModelLoader& ml, const std::string& base,
                             ggml_tensor* x) {
-    const TernaryWeight& w = weight_for(ml, base);
+    const bool five = ml.tensor(base + ".fvcodes") != nullptr && ml.tensor(base + ".qweight") == nullptr;
+    const FiveValuePair* fv = five ? &five_for(ml, base) : nullptr;
+    const TernaryWeight& w = five ? *fv->lo : weight_for(ml, base);
     if (x->type != GGML_TYPE_F32 || (int)x->ne[0] != w.K)
         throw std::runtime_error("ternary: input shape mismatch for " + base);
     if (!ggml_is_contiguous(x)) x = ggml_cont(ctx, x);
@@ -354,38 +551,42 @@ ggml_tensor* ternary_linear(ggml_context* ctx, const ModelLoader& ml, const std:
     ggml_tensor* act = ggml_custom_4d(ctx, GGML_TYPE_I8, (int64_t)ternary_act_row_bytes(w.K), T, 1, 1,
                                       a1, 1, op_quant, GGML_N_TASKS_MAX, nullptr);
     ggml_tensor* a2[1] = {act};
-    return ggml_custom_4d(ctx, GGML_TYPE_F32, w.N, x->ne[1], x->ne[2], x->ne[3], a2, 1, op_matmul,
-                          GGML_N_TASKS_MAX, const_cast<TernaryWeight*>(&w));
+    ggml_tensor* y = ggml_custom_4d(ctx, GGML_TYPE_F32, w.N, x->ne[1], x->ne[2], x->ne[3], a2, 1, op_matmul,
+                                    GGML_N_TASKS_MAX, const_cast<TernaryWeight*>(&w));
+    if (!five) return y;
+    // The activations are quantized once; the second plane reads the same bytes.
+    ggml_tensor* y2 = ggml_custom_4d(ctx, GGML_TYPE_F32, w.N, x->ne[1], x->ne[2], x->ne[3], a2, 1, op_matmul,
+                                     GGML_N_TASKS_MAX, const_cast<TernaryWeight*>(fv->hi.get()));
+    return ggml_add(ctx, y, y2);
 }
 
 void ternary_prepare(const ModelLoader& ml) {
     const ParakeetConfig& cfg = ml.config();
     const int64_t d = cfg.d_model, ff = cfg.ff_dim;
-    if (cfg.ternary.group_size != (uint32_t)kTernaryGroup)
+    if (cfg.ternary.present && cfg.ternary.group_size != (uint32_t)kTernaryGroup)
         throw std::runtime_error("ternary: group_size must be 128");
     if (d <= 0 || ff <= 0) throw std::runtime_error("ternary: invalid d_model / ff_dim");
-    struct Lin2 { const char* name; int64_t N, K; };
-    const Lin2 kLinears[] = {
-        {"feed_forward1.linear1", ff, d},  {"feed_forward1.linear2", d, ff},
-        {"feed_forward2.linear1", ff, d},  {"feed_forward2.linear2", d, ff},
-        {"self_attn.linear_q", d, d},      {"self_attn.linear_k", d, d},
-        {"self_attn.linear_v", d, d},      {"self_attn.linear_out", d, d},
-        {"self_attn.linear_pos", d, d},    {"conv.pointwise_conv1", 2 * d, d},
-        {"conv.pointwise_conv2", d, d}};
+    const std::vector<LinearShape> kLinears = encoder_linears(cfg);
     const int n_layers = (int)cfg.n_layers;
     // Validate everything serially and in layer order (the first error is the
     // one reported), then repack the queued weights on a small thread pool.
     TernaryStore& store = store_of(ml);
     std::vector<TernaryJob> jobs;
     for (int i = 0; i < n_layers; ++i) {
-        for (const Lin2& l : kLinears) {
+        for (const LinearShape& l : kLinears) {
             const std::string base = "encoder.layers." + std::to_string(i) + "." + l.name;
-            if (has_ternary(ml, base)) {
+            if (ml.tensor(base + ".qweight")) {
                 {
                     std::lock_guard<std::mutex> lk(store.mu);
                     if (store.weights.count(base)) continue;
                 }
                 jobs.push_back(make_job(ml, base, l.N, l.K));
+            } else if (ml.tensor(base + ".fvcodes")) {
+                {
+                    std::lock_guard<std::mutex> lk(store.mu);
+                    if (store.five.count(base)) continue;
+                }
+                jobs.push_back(make_five_job(ml, base, l.N, l.K));
             } else if (!ml.tensor(base + ".weight")) {
                 throw std::runtime_error("ternary: missing weight " + base);
             }
@@ -409,7 +610,16 @@ void ternary_prepare(const ModelLoader& ml) {
     for (TernaryJob& j : jobs)
         if (j.err) std::rethrow_exception(j.err);
     std::lock_guard<std::mutex> lk(store.mu);
-    for (TernaryJob& j : jobs) store.weights.emplace(j.base, std::move(j.out));
+    for (TernaryJob& j : jobs) {
+        if (j.five) {
+            FiveValuePair p;
+            p.lo = std::move(j.out);
+            p.hi = std::move(j.out_hi);
+            store.five.emplace(j.base, std::move(p));
+        } else {
+            store.weights.emplace(j.base, std::move(j.out));
+        }
+    }
     if (std::strcmp(ternary_kernel_name(), "scalar") == 0)
         PK_LOG("packed ternary weights are running on the slow scalar kernel on this CPU/build "
                "(about 1 GMAC/s); re-convert with --ternary dequant for speed");

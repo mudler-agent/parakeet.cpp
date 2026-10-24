@@ -139,6 +139,34 @@ VAD-only slices (made with `scripts/slice_vad_gguf.py`, cut from the Ultra and R
 Both carry the `parakeet.vad.*` KVs and `vad_head.*` tensors unless converted
 with `--vad drop`.
 
+### `FermionResearch/Phonon-2.5` and `FermionResearch/Phonon-2.5-English` (v3 shape, CC-BY-4.0)
+
+Phonon-2.5 (25 languages) and Phonon-2.5-English by Fermion Research, derived from
+`nvidia/parakeet-tdt-0.6b-v3`. Converted with `scripts/convert_hf_parakeet_to_gguf.py --fermion`
+from the release archives `phonon-2.5.bps.tar.zst` (SHA-256 `1faa04053a472cabab3bc31d07f30c23f22906f71044ca10eb1f0de36d1f19a9`, revision
+`96dad4f3b5b784b1aa595213ea7481bf8a7addcd`) and `phonon-2.5-en.bps.tar.zst` (SHA-256
+`6bd8119ac5a637e5ece0666f5c1e43dbcd99e1c36b3d0ef3ec5f9b58260a9dd4`, revision `12f7f10c79f324d1454776c7bb63a7cdbb8ac548`), with `--template` the
+published `tdt-0.6b-v3-f16.gguf`. Published in
+[mudler/parakeet-cpp-gguf](https://huggingface.co/mudler/parakeet-cpp-gguf) with the upstream notice in
+`NOTICE-phonon-2.5.txt` (CC-BY-4.0: credit Fermion Research and NVIDIA, and note the files are converted copies;
+the training audio includes CHiME-6 under CC-BY-SA-4.0 and SPGISpeech under Kensho's terms, see `docs/licenses.md`).
+Parity with the transformers reference, WER on a FLEURS subset, and the speed of the packed files are in `docs/phonon.md`.
+
+| File | Source and flags | Size (bytes) | SHA-256 |
+|---|---|---:|---|
+| [`phonon-2.5-f16.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-f16.gguf) | Phonon-2.5, `--dtype f16` | 1,441,046,368 | `6be6fb7928c1732fd8b881aeaa2bb644fc2ff2464e5a88b3d1017fd34a931ee4` |
+| [`phonon-2.5-q8_0.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-q8_0.gguf) | Phonon-2.5, `--dtype q8_0` | 940,663,648 | `be2955ea73ca36fb84e69d95abbc2de67e06dec7bb45cc3f53db15c1dca8eee8` |
+| [`phonon-2.5-q4_k.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-q4_k.gguf) | Phonon-2.5, `parakeet-cli quantize` of the F32 file, `q4_k` | 675,200,864 | `1405f0cd3a71260c0029cf7ff73ab2619a383dbc4c21109923605a85886b1c7a` |
+| [`phonon-2.5-packed.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-packed.gguf) | Phonon-2.5, `--five-value keep --dtype f16` (packed) | 241,719,776 | `f0339284e385c89a73ebc860937f1c1c346311efee6a40d995f8623b2d8cf7a3` |
+| [`phonon-2.5-english-f16.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-english-f16.gguf) | Phonon-2.5-English, `--dtype f16` | 1,441,046,368 | `e5556403115bf3941e769ae84e860c7d2e5d9aad89d986438c31a0e688dc417d` |
+| [`phonon-2.5-english-q8_0.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-english-q8_0.gguf) | Phonon-2.5-English, `--dtype q8_0` | 940,663,648 | `c484f673e7873761a31c38c2629afe0975dfb2025292730febd93f635489ad70` |
+| [`phonon-2.5-english-q4_k.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-english-q4_k.gguf) | Phonon-2.5-English, `parakeet-cli quantize` of the F32 file, `q4_k` | 675,200,864 | `a0f89ff0bacbba1b6a8a8506a31b11e794550ff7290979c4e50cfd38f40d12c8` |
+| [`phonon-2.5-english-packed.gguf`](https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main/phonon-2.5-english-packed.gguf) | Phonon-2.5-English, `--five-value keep --dtype f16` (packed) | 241,605,216 | `0ee054a9dfe000884224999e4805c48bfb98343763c08b8133bd401e182a7ab2` |
+
+The F16, Q8_0 and Q4_K files hold ordinary weights and run on every backend. The packed files keep the 264
+encoder linears as Fermion ships them and run on the CPU only, offline only (`docs/ternary.md`, "Five-value
+encoders"); they hold the other tensors in F32, and F16 for the three allowlisted linears.
+
 ---
 
 ## Notes

@@ -2,19 +2,22 @@
 // more wav files, as raw little-endian float32, to compare with a reference
 // implementation (see docs/phonon.md).
 //
-//   dump_encoder [--mel-dir D] <model.gguf> <out_dir> <a.wav> [b.wav ...]
+//   dump_encoder [--mel-dir D] [--layers 0,11,23] <model.gguf> <out_dir> <a.wav> [b.wav ...]
 //
 // Per input, <out_dir>/<stem>.enc.f32 holds the encoder output row-major
 // [d_model, T'] (time fastest), the same orientation as Encoder::forward,
 // and <out_dir>/<stem>.mel.f32 holds the log-mel features this program used,
 // row-major [n_mels, T]. With --mel-dir the features are read from
 // D/<stem>.mel.f32 (same layout) instead of computed from the wav, so the
-// encoder can be compared with a reference on identical input.
+// encoder can be compared with a reference on identical input. With --layers
+// the outputs of those encoder layers are written too, as <stem>.layerN.f32,
+// row-major [T', d_model].
 #include "audio_io.hpp"
 #include "encoder.hpp"
 #include "mel.hpp"
 #include "model_loader.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -39,10 +42,19 @@ static bool read_f32(const std::string& path, std::vector<float>& v) {
 
 int main(int argc, char** argv) {
     std::string mel_dir;
+    std::vector<int> layers;
     int a0 = 1;
-    if (argc > 2 && std::string(argv[1]) == "--mel-dir") {
-        mel_dir = argv[2];
-        a0 = 3;
+    while (argc > a0 + 1 && (std::string(argv[a0]) == "--mel-dir" || std::string(argv[a0]) == "--layers")) {
+        if (std::string(argv[a0]) == "--mel-dir") {
+            mel_dir = argv[a0 + 1];
+        } else {
+            for (const char* p = argv[a0 + 1]; *p;) {
+                char* end = nullptr;
+                layers.push_back((int)std::strtol(p, &end, 10));
+                p = *end == ',' ? end + 1 : end;
+            }
+        }
+        a0 += 2;
     }
     if (argc - a0 < 3) {
         std::fprintf(stderr, "usage: dump_encoder [--mel-dir D] <model.gguf> <out_dir> <a.wav> [...]\n");
@@ -75,7 +87,14 @@ int main(int argc, char** argv) {
         }
         std::vector<float> out;
         int d = 0, To = 0;
-        enc.forward(feats, n_mels, T, out, d, To);
+        if (layers.empty()) {
+            enc.forward(feats, n_mels, T, out, d, To);
+        } else {
+            std::vector<std::vector<float>> lo;
+            enc.forward_capture(feats, n_mels, T, out, d, To, layers, lo);
+            for (size_t j = 0; j < layers.size(); ++j)
+                if (!write_f32(out_dir + "/" + stem + ".layer" + std::to_string(layers[j]) + ".f32", lo[j])) return 1;
+        }
         if (!write_f32(out_dir + "/" + stem + ".enc.f32", out)) return 1;
         std::printf("%s d_model=%d frames=%d\n", stem.c_str(), d, To);
     }

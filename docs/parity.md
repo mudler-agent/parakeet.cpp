@@ -738,3 +738,13 @@ PARAKEET_TEST_GGUF=/tmp/pk110m.gguf \
 PARAKEET_TEST_BASELINE_TS=/tmp/baseline_ts.gguf \
 ctest --test-dir build -R "test_timestamps|test_capi_timestamps" --output-on-failure
 ```
+
+## Phonon-2.5 (Fermion Research, container format)
+
+`FermionResearch/Phonon-2.5` and `Phonon-2.5-English` share the v3 architecture and are converted with
+`scripts/convert_hf_parakeet_to_gguf.py --fermion` (see `docs/phonon.md`). There is no NeMo baseline. The reference
+is the stock transformers `ParakeetForTDT` in fp32 on the same weights. On identical log-mel input the
+encoder output of the F32 GGUF differs by at most 1.0e-6 (25 clips, 6 languages; 1.3e-6 on 5 clips for the English
+model), and the token ids and text are identical in all 30 clip runs with parakeet.cpp's own front end.
+The packed (five-value) files are not bit-identical to the dequantized ones (int8 activations); they
+give the same transcripts on the test fixtures, and WER within noise of F16 on a FLEURS subset.

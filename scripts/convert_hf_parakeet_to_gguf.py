@@ -29,7 +29,12 @@ HF ``config.json`` of nvidia/parakeet-tdt-0.6b-v3 with ``--config``). The
 archive SHA-256 is checked against ``SHA256SUMS.txt`` next to it, or against
 ``--sha256``, and every member against the manifests inside the archive. The
 five-value, int6 and fp16 records are expanded to float32, and the rest of the
-conversion is the same as for a safetensors checkpoint. See ``scripts/fermion_reader.py``.
+conversion is the same as for a safetensors checkpoint. With ``--five-value keep``
+the 264 five-value linears are not expanded: their upstream bytes are written
+unchanged as ``<base>.fvcodes`` (I8), ``<base>.fvhi`` (I8) and ``<base>.fvscale``
+(F16, shape [2, N]: lo then hi), together with ``parakeet.fivevalue.present``;
+the engine splits them into two ternary planes at load (docs/phonon.md).
+See ``scripts/fermion_reader.py``.
 """
 import argparse
 import json
@@ -147,16 +152,25 @@ def unpack_ternary(q, scales, in_features, group):
 _POINTWISE = re.compile(r"\.conv\.pointwise_conv[12]\.weight$")
 
 
+class FiveValueRaw(tuple):
+    """(module name, trit bytes [O, ceil(I/5)], hi-flag bytes, lo fp16 [O], hi fp16 [O])."""
+
+
 def read_fermion(args, tkv, tv):
     """Yield (HF name, float32 array) for every record of a Phonon release.
 
     Five-value matrices come out as the dense matrix named ``<module>.weight``;
     the 1x1 convolutions are reshaped to [out, in, 1] like the safetensors export.
+    With ``--five-value keep`` they come out as (module name, FiveValueRaw) instead.
     """
     rel = fermion_reader.load_release(args.fermion, sums=args.sums, sha256=args.sha256,
                                       verify=not args.no_verify)
     check_fermion_config(rel.nemo_config, tkv, tv)
     for rec in fermion_reader.iter_records(rel.container):
+        if rec.kind == "five_value" and args.five_value == "keep":
+            trits, hibits, lo, hi = fermion_reader.split_five_value(rec.blob, rec.shape)
+            yield rec.name, FiveValueRaw((rec.name, trits, hibits, lo, hi))
+            continue
         arr = fermion_reader.decode_record(rec)
         name = rec.name + (".weight" if rec.kind == "five_value" else "")
         if arr.ndim == 2 and _POINTWISE.search(name):
@@ -213,6 +227,9 @@ def main():
     ap.add_argument("--sums", help="SHA256SUMS.txt that lists the --fermion archive (default: the one next to it)")
     ap.add_argument("--sha256", help="expected SHA-256 of the --fermion archive, instead of --sums")
     ap.add_argument("--no-verify", action="store_true", help="skip the --fermion checksum checks")
+    ap.add_argument("--five-value", choices=["dequant", "keep"], default="dequant", dest="five_value",
+                    help="--fermion only. keep: store the five-value linears as their upstream bytes "
+                    "(<name>.fvcodes/.fvhi/.fvscale, needs the CPU engine); dequant: ordinary weights")
     ap.add_argument("--template", required=True,
                     help="GGUF of nvidia/parakeet-tdt-0.6b-v3 from convert_parakeet_to_gguf.py (KV, vocab, mel buffers)")
     ap.add_argument("--output", required=True)
@@ -226,6 +243,8 @@ def main():
 
     if bool(args.hf) == bool(args.fermion):
         sys.exit("give exactly one of --hf and --fermion")
+    if args.five_value == "keep" and not args.fermion:
+        sys.exit("--five-value keep needs --fermion")
     if args.fermion:
         if not args.config:
             sys.exit("--fermion needs --config (the HF config.json of nvidia/parakeet-tdt-0.6b-v3)")
@@ -294,6 +313,13 @@ def main():
     else:
         tensor_stream = read_safetensors(src / "model.safetensors")
     for name, arr in tensor_stream:
+        if isinstance(arr, FiveValueRaw):
+            _, trits, hibits, lo, hi = arr
+            base = hf_to_nemo(name + ".weight")[: -len(".weight")]
+            raw[base + ".fvcodes"] = np.ascontiguousarray(trits).view(np.int8)
+            raw[base + ".fvhi"] = np.ascontiguousarray(hibits).view(np.int8)
+            raw[base + ".fvscale"] = np.ascontiguousarray(np.stack([lo, hi]), dtype=np.float16)
+            continue
         if arr.ndim == 0:
             continue
         if _VAD.match(name):
@@ -335,6 +361,7 @@ def main():
     # The tensor set must equal the template's (minus the weights replaced by
     # qweight/scales), with identical shapes.
     replaced = {n[: -len(".qweight")] + ".weight" for n in raw if n.endswith(".qweight")}
+    replaced |= {n[: -len(".fvcodes")] + ".weight" for n in raw if n.endswith(".fvcodes")}
     expect = {n for n in ttensors
               if not n.startswith("ctc_decoder.") and not n.startswith("decoder.decoder_layers")} - replaced
     got = set(tens)
@@ -349,6 +376,8 @@ def main():
     if keep_tern:
         w.add_bool("parakeet.ternary.present", True)
         w.add_uint32("parakeet.ternary.group_size", 128)
+    if any(n.endswith(".fvcodes") for n in raw):
+        w.add_bool("parakeet.fivevalue.present", True)
     if any(n.startswith("vad_head.") for n in raw):
         proj, ctxw = raw["vad_head.proj.weight"], raw["vad_head.ctx.weight"]
         hop, sub, sr = (int(tv["parakeet.preprocessor.hop_length"]),
@@ -385,7 +414,8 @@ def main():
     w.write_tensors_to_file()
     w.close()
     print(f"wrote {args.output}: arch=tdt tensors={written + len(raw)} dtype={args.dtype} "
-          f"quantized={quantized} ternary={'keep' if keep_tern else 'dequant'} raw={len(raw)}")
+          f"quantized={quantized} ternary={'keep' if keep_tern else 'dequant'} "
+          f"five-value={args.five_value if args.fermion else 'n/a'} raw={len(raw)}")
 
 
 def _copy_kv(w, key, f):

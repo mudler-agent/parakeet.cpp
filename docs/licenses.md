@@ -12,6 +12,8 @@ script differ, so change both together.
 
 | Source checkpoint | Licence | Licence text | Notice to keep |
 |---|---|---|---|
+| `FermionResearch/Phonon-2.5` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> | Phonon-2.5, Copyright 2026 Fermion Research, derived from nvidia/parakeet-tdt-0.6b-v3 (c) NVIDIA Corporation. Training audio includes CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms) |
+| `FermionResearch/Phonon-2.5-English` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> | Phonon-2.5 English, Copyright 2026 Fermion Research, derived from nvidia/parakeet-tdt-0.6b-v3 (c) NVIDIA Corporation. Training audio includes CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms) |
 | `moondream/parakeet-redux` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |
 | `moondream/parakeet-ultra` | CC-BY-4.0 | <https://creativecommons.org/licenses/by/4.0/> |  |
 | `nvidia/Nemotron-3-Diarization` | OpenMDW 1.1 | <https://openmdw.ai/license/1-1/> |  |
@@ -33,6 +35,12 @@ Notes:
 - The Moondream Ultra and Redux files are converted here, not trained. Credit
   Moondream and NVIDIA (`parakeet-tdt-0.6b-v3`) when you use them. The Redux F16 and
   Q8_0 files are dequantized from the ternary weights.
+- The Phonon-2.5 files (multilingual and English) are converted here, not trained. The
+  weights are CC-BY-4.0 and the Fermion code is Apache-2.0. Credit Fermion Research and
+  NVIDIA (`parakeet-tdt-0.6b-v3`) when you use them. The training audio of Phonon-2.5 includes
+  CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms); the upstream NOTICE is kept
+  in `NOTICE-phonon-2.5.txt` in the Hugging Face repo. Whether the share-alike term of CHiME-6
+  reaches the trained weights is a legal question that this project does not settle.
 - The Silero VAD files are converted from the official ONNX model, not trained.
 - Static card text for the files that `publish_hf.py` does not convert (diarization,
   Moondream, Silero VAD, and the Nemotron 3.5 usage note) lives in `scripts/hf_card/`.

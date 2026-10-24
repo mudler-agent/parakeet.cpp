@@ -169,6 +169,8 @@ LICENSES: dict = {
     "nvidia/Nemotron-3-Diarization": OPENMDW_1_1,
     "moondream/parakeet-ultra": CC_BY_4_0,
     "moondream/parakeet-redux": CC_BY_4_0,
+    "FermionResearch/Phonon-2.5": CC_BY_4_0,
+    "FermionResearch/Phonon-2.5-English": CC_BY_4_0,
     "snakers4/silero-vad": MIT_SILERO,
 }
 
@@ -178,6 +180,12 @@ LICENSE_NOTICES: dict = {
         "Licensed by NVIDIA Corporation under the NVIDIA Open Model License",
     "snakers4/silero-vad":
         "Copyright (c) 2020-present Silero Team. Released under the MIT license",
+    "FermionResearch/Phonon-2.5":
+        "Phonon-2.5, Copyright 2026 Fermion Research, derived from nvidia/parakeet-tdt-0.6b-v3 "
+        "(c) NVIDIA Corporation. Training audio includes CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms)",
+    "FermionResearch/Phonon-2.5-English":
+        "Phonon-2.5 English, Copyright 2026 Fermion Research, derived from nvidia/parakeet-tdt-0.6b-v3 "
+        "(c) NVIDIA Corporation. Training audio includes CHiME-6 (CC-BY-SA-4.0) and SPGISpeech (Kensho terms)",
 }
 
 # Models and files on the card that this script does not convert. Their card
@@ -187,6 +195,7 @@ EXTERNAL_SECTIONS: list = [
     (("nvidia/Nemotron-3-Diarization",), "diarization.md"),
     (("moondream/parakeet-ultra", "moondream/parakeet-redux"), "moondream.md"),
     (("snakers4/silero-vad",), "silero-vad.md"),
+    (("FermionResearch/Phonon-2.5", "FermionResearch/Phonon-2.5-English"), "phonon.md"),
 ]
 # Extra text that follows the table of a converted model (note + usage).
 MODEL_EXTRA_SECTIONS: dict = {

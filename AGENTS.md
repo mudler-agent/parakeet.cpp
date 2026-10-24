@@ -100,7 +100,7 @@ src/                 libparakeet implementation
                        ced_tagger.hpp/cpp , pk::CedTagger: loads a CED GGUF (ced.cpp) into a tagger context, pk::SoundScorer
                        sound_stream.hpp/cpp, pk::SoundStream: sliding-window sound-event detection over live PCM
                        scene_stream.hpp/cpp, pk::SceneStream: combined ASR + diarization + sound-event stream
-                       ternary.hpp/cpp    , packed ternary (moondream/parakeet-redux) linears: repack once, int8 activations, scalar ref + two-op ggml custom op
+                       ternary.hpp/cpp    , packed ternary (moondream/parakeet-redux) linears: repack once, int8 activations, scalar ref + two-op ggml custom op; five-value linears (Phonon-2.5) split into two planes at load
                        ternary_kernels.hpp, ternary_kernels_x86.cpp (AVX-512 VNNI / AVX2), ternary_kernels_neon.cpp
                        vad_head.hpp/cpp   , voice-activity head of Ultra/Redux (plain C++ loops), Model::vad_probabilities
                        vad_segmenter.hpp/cpp, pk::segment_by_vad: cut long audio at VAD pauses (SegmenterOpts), used by `transcribe --vad`
@@ -115,7 +115,9 @@ examples/cli/        parakeet-cli binary
 scripts/             Python tooling
                        convert_parakeet_to_gguf.py, .nemo/.hf -> GGUF (--dtype f32|f16|q8_0)
                        bundle_gguf.py              , merge GGUFs into one bundle; --list/--verify/--notice with the licence texts of scripts/bundle_licenses/ (docs/bundle.md)
-                       convert_hf_parakeet_to_gguf.py, HF safetensors (moondream/parakeet-ultra, -redux) to GGUF (--template, --ternary keep|dequant, --vad keep|drop)
+                       convert_hf_parakeet_to_gguf.py, HF safetensors (moondream/parakeet-ultra, -redux) or a Phonon-2.5 release (--fermion) to GGUF (--template, --ternary keep|dequant, --five-value keep|dequant, --vad keep|drop)
+                       fermion_reader.py          , reader for the Phonon-2.5 five-value container (.bps.tar.zst, SHA-256 checks), numpy only
+                       hf_phonon_reference.py, compare_hf_reference.py, transformers ParakeetForTDT reference dump of a Phonon release and the comparison with parakeet.cpp (docs/phonon.md)
                        slice_vad_gguf.py          , cut a VAD-only GGUF (parakeet.arch "vad") out of an Ultra or Redux GGUF
                        gen_nemo_baseline.py        , NeMo intermediates -> baseline.gguf
                        gen_stream_baseline.py      , NeMo cache-aware streaming encode+decode -> stream baseline.gguf
@@ -155,6 +157,10 @@ tests/               ctest targets
                        test_ternary_model.cpp  , packed Redux == dequantized Redux transcript (PARAKEET_TEST_GGUF_REDUX_KEEP + _DEQ)
                        test_model_loader_ternary.cpp, ternary + VAD flags from GGUF KVs
                        bench_ternary.cpp       , single-thread throughput of each ternary kernel (not a ctest)
+                       test_fivevalue.cpp      , five-value plane split == dequantized weights, planes disjoint, bad input refused (model-independent)
+                       test_fivevalue_model.cpp, packed Phonon == dequantized Phonon (weights bit for bit, transcripts) (PARAKEET_TEST_GGUF_PHONON_KEEP + _DEQ)
+                       dump_encoder.cpp        , dump log-mel and encoder output (optionally given log-mel, per-layer outputs) for reference comparisons (not a ctest)
+                       python/check_fermion_reader.py, round trip of the Phonon container reader (model-independent)
                        test_vad_head.cpp       , VAD head probabilities (PARAKEET_TEST_GGUF_ULTRA)
                        test_vad_segmenter.cpp  , segmenter cut rules, 32 ms grid, Silero defaults, event tracker (model-independent)
                        test_vad_options.cpp    , VAD option parser, NULL and bad-file C-API paths (model-independent)
@@ -205,7 +211,7 @@ docs/
   diarization.md    , speaker diarization + speaker-attributed ASR: parity, C-API, speed
   sound.md          , sound-event detection (CED) and the combined scene stream
   speaker.md        , speaker identification: enroll, scene naming, C-API v9 and v10, measured numbers
-  vad.md, vad-benchmarks.md, ultra-redux.md, batching.md, performance.md, cli.md, capi.md, docker.md, licenses.md, tdt-nbest.md
+  vad.md, vad-benchmarks.md, ultra-redux.md, phonon.md, batching.md, performance.md, cli.md, capi.md, docker.md, licenses.md, tdt-nbest.md
                       , see the documentation table in README.md
 .github/workflows/
   ci.yml            , build job (per-push) + closed-loop job (pull_request + dispatch)
@@ -293,12 +299,15 @@ mel/fft parameters do not need to be specified manually.
 
 ## Ternary GGUF flags
 
-Two optional GGUF flags, both read into `ParakeetConfig`:
+Optional GGUF flags, read into `ParakeetConfig`:
 
 - `parakeet.ternary.present` (with `parakeet.ternary.group_size` = 128): the
   encoder linears are stored as `<name>.qweight` (I8) + `<name>.scales` (F16).
   CPU only, offline only (no streaming). `PARAKEET_TERNARY_KERNEL=scalar|avx2|vnni|neon`
   forces a kernel. See `docs/ternary.md`.
+- `parakeet.fivevalue.present`: the encoder linears are stored as the upstream Phonon-2.5
+  bytes `<name>.fvcodes` (I8) + `.fvhi` (I8) + `.fvscale` (F16, [N, 2]); the loader splits
+  each into two ternary planes. CPU only, offline only. See `docs/ternary.md`, `docs/phonon.md`.
 - `parakeet.vad.present` (with `parakeet.vad.d_in/hidden/kernel/frame_sec`): the
   file carries `vad_head.*` tensors.
 

@@ -32,8 +32,10 @@ Converted here, not trained. Credit Fermion Research and NVIDIA, see [Licence](#
 
 | File | Source | Form | Runs on |
 |---|---|---|---|
-| `phonon-2.5-f16.gguf`, `-q8_0`, `-q6_k`, `-q4_k` | Phonon-2.5 (25 languages) | the container expanded to ordinary weights, then F16, Q8_0 or a K-quant | any backend |
-| `phonon-2.5-english-f16.gguf`, `-q8_0`, `-q6_k`, `-q4_k` | Phonon-2.5-English | same | any backend |
+| `phonon-2.5-f16.gguf`, `-q8_0`, `-q4_k` | Phonon-2.5 (25 languages) | the container expanded to ordinary weights, then F16, Q8_0 or Q4_K | any backend |
+| `phonon-2.5-packed.gguf` | Phonon-2.5 | the five-value encoder kept packed, see [Packed files](#packed-files-five-value-encoder-cpu) | CPU only, offline only |
+| `phonon-2.5-english-f16.gguf`, `-q8_0`, `-q4_k` | Phonon-2.5-English | same as the multilingual ones | any backend |
+| `phonon-2.5-english-packed.gguf` | Phonon-2.5-English | same | CPU only, offline only |
 
 The sizes and SHA-256 sums of the published files are in
 [models/MANIFEST.md](../models/MANIFEST.md).
@@ -61,7 +63,7 @@ python3 scripts/convert_hf_parakeet_to_gguf.py \
 - Zstandard is read with the standard library (Python 3.14), the `zstandard` package or the
   `zstd` command.
 - K-quants come from `parakeet-cli quantize phonon-2.5-f32.gguf phonon-2.5-q4_k.gguf q4_k`, as
-  for the other models.
+  for the other models (the F32 file is the converter's default `--dtype f32`).
 - The 1x1 convolutions are reshaped to `[out, in, 1]` and the BatchNorm batch counters are
   dropped, as in the Redux converter.
 
@@ -109,8 +111,7 @@ NeMo config matches the v3 template in every field the converter checks, so it n
 The input to the first row is the reference's log-mel cut to the number of frames its attention
 mask marks as audio. The reference treats the last mel frame of most clips as padding.
 parakeet.cpp has no reason to and encodes it. If the encoder is run on the same input without
-the cut, the largest difference per clip is between 1.8e-3 and 1.1e-1 (3.4e-6 on `speech.wav`,
-which has no such frame), and the token ids stay the same. Cutting the input in the comparison
+the cut, the largest difference per clip is between 1.8e-3 and 1.1e-1 (3.4e-6 on `speech.wav`), and the token ids stay the same. Cutting the input in the comparison
 removes the difference: on one clip it goes from 8.6e-2 to 2.7e-7. This convention is a property
 of the engine and the reference, not of the Phonon weights; it was not checked against the v3
 weights.
@@ -160,3 +161,100 @@ that claim: it has 6 of the 25 languages.
 Phonon-2.5-English on the 30 English utterances: F16 5.67, Q8_0 5.67, Q4_K 5.37 (670 words;
 the multilingual model scores 4.78 on the same utterances and v3 5.67). That is a difference
 of 6 words, so it says nothing about which model is better.
+
+## Packed files (five-value encoder, CPU)
+
+`--five-value keep` keeps the 264 five-value linears as the bytes Fermion ships, instead of
+expanding them (`phonon-2.5-packed.gguf`, `phonon-2.5-english-packed.gguf`). The converter also writes
+`parakeet.fivevalue.present`. The engine splits each matrix into two ternary planes at load
+and runs both on the Redux kernels. Format, runtime path, tests and limits are in
+[ternary.md](ternary.md#five-value-encoders-phonon-25).
+
+```
+python3 scripts/convert_hf_parakeet_to_gguf.py \
+    --fermion phonon-2.5.bps.tar.zst --sums SHA256SUMS.txt \
+    --config parakeet-tdt-0.6b-v3/config.json --template tdt-0.6b-v3-f16.gguf \
+    --name phonon-2.5 --dtype f16 --five-value keep --output phonon-2.5-packed.gguf
+```
+
+| File | Size | Resident weights |
+|---|---:|---|
+| `phonon-2.5-packed.gguf` | 241.7 MB | the file, plus about 300 MB of repacked planes (2 planes x 2 bits x 603 M weights) |
+| `phonon-2.5-q8_0.gguf` | 940.7 MB | the file |
+| `phonon-2.5-f16.gguf` | 1,441.0 MB | the file |
+
+The 242 MB is 160 MB of five-value bytes (2.1 bits per weight) and 82 MB of other tensors. Those are
+F32, as for every GGUF here, except the three allowlisted linears that `--dtype f16` stores as F16. A
+smaller packed file would need those tensors in a lower precision, which this converter does not do.
+
+What was checked, with the F16 file as the reference:
+
+- All 264 matrices of Phonon-2.5: the planes rebuild the weights of the F16 file bit for bit
+  (0 mismatching weights of 603 million; `test_fivevalue_model`). The converter's output holds the
+  upstream bytes unchanged (compared tensor by tensor).
+- `tests/fixtures/speech.wav` and `two_speakers.wav` give the same transcripts as the F16 file; a batch
+  of the two equals the two single runs.
+- The int8 activation quantization is not part of the upstream model, so the encoder output is not
+  the F16 output. On 4 clips the relative L2 difference of the encoder output is 7.9% to 11.2%
+  (Redux, same test on 2 clips: 4.4% and 4.6%, measured against its Q8_0 file). By layer on `speech.wav`: 1.1% after
+  layer 0, 4% to 6% in the middle, 11% after layer 23. Transcripts and WER are not visibly affected,
+  see below.
+- WER on the FLEURS subset above: packed 5.65 (MEAN) and 5.47 pooled, against F16 5.59 and 5.42. The
+  paired bootstrap difference packed minus F16 is +0.05 points, interval -0.17 to +0.28. For
+  Phonon-2.5-English the packed file scores 5.67 on the 30 English utterances, like its F16 file.
+
+### Speed
+
+**These timings are not reliable.** The host was shared and busy for the whole session: the one-minute load
+average was between 9 and 26 on 12 logical CPUs (AMD Ryzen 5 7430U, 6 cores, AVX2, no AVX-512, so the
+`avx2` ternary kernel ran). No run kept a load below 6. Read the numbers as
+indicative; repeat them on an idle machine before quoting them.
+
+One thread, pinned to one logical CPU (`taskset -c 5 parakeet-cli bench --threads 1`), the first 30 utterances of
+`benchmarks/librispeech_manifest.tsv` (241.7 s of audio). RTF is audio seconds over the summed per-utterance
+`proc_ms`; two passes, packed, Q8_0 and F16 one after the other. Load is the one-minute average at the start of the run.
+
+| File | RTF pass 1 (load) | RTF pass 2 (load) | Peak RSS |
+|---|---|---|---:|
+| `phonon-2.5-packed.gguf` | 4.40 (20.1) | 4.18 (13.4) | 755 MB |
+| `phonon-2.5-q8_0.gguf` | 3.44 (10.8) | 2.66 (9.8) | 1,099 MB |
+| `phonon-2.5-f16.gguf` | 3.49 (12.0) | 2.67 (25.5) | 1,590 MB |
+
+Eight threads, all 100 utterances (901 s), the three files in turn, three passes, `taskset` not used. RTF per pass:
+packed 6.6, 6.6, 7.5; Q8_0 5.2, 4.7, 7.0; F16 6.6, 8.6, 6.5. The load average at the start of the runs was 5.0 to 26
+(only the two first packed runs started below 6, and the load rose at once). That is too noisy to rank the
+files.
+
+The kernel alone (`build/tests/bench_ternary N K 100 10`, one thread, load about 16): one plane of
+4096 x 1024 takes 4.1 ms, ggml Q8_0 11.6 ms and F16 9.3 ms; for 1024 x 4096 4.7 ms, 11.7 ms and 8.9 ms. The packed
+linear runs two planes on the same quantized activations, which is about twice the single-plane time, so it
+should stay below Q8_0 on this CPU, and the end-to-end runs above agree.
+
+WER on the 100 LibriSpeech utterances of that manifest (plain normalizer, same run as the 8-thread timings):
+F16 1.78, Q8_0 1.78, packed 1.91 (about 2 words more).
+
+**Fused kernel: not written.** The idea is one kernel that reads both planes of a linear in one pass. The
+two-plane version is already faster than Q8_0 on this CPU, so the measurements give no reason for it; it was
+not profiled further. A VNNI or NEON machine might tell another story.
+
+## Licence
+
+The Phonon-2.5 weights are released by Fermion Research under CC-BY-4.0, and the model is derived from
+NVIDIA's [parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), also CC-BY-4.0. Fermion's
+code is Apache-2.0; none of it is in this repository (`scripts/fermion_reader.py` is a new implementation of the
+format). When you use the GGUF files, credit Fermion Research and NVIDIA, link the
+[licence](https://creativecommons.org/licenses/by/4.0/) and say that the files are converted (and quantized, or
+unpacked) copies. Nothing was trained or fine-tuned here.
+
+The upstream `NOTICE` says that the training audio includes CHiME-6, distributed under CC-BY-SA-4.0, and
+SPGISpeech, used under Kensho's public terms. The Hugging Face repo keeps that notice, unchanged, in
+`NOTICE-phonon-2.5.txt`. Whether the share-alike term of CHiME-6 reaches the trained weights, and so the
+converted files, is a legal question that this project does not settle. See also [licenses.md](licenses.md).
+
+## Limits
+
+- Packed files: CPU only, offline only, no streaming; the AVX2, AVX-512 VNNI and NEON dot-product kernels
+  are fast, the scalar kernel (MSVC, Windows on ARM) is not. Use a dense file there.
+- The format of the upstream container is marked v1 and the release is days old. The reader refuses
+  anything it does not know; check the archive digest before relying on a newer release.
+- The WER figures above come from 30 utterances per language. They do not rank the models.

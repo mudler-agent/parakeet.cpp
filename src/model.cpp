@@ -73,14 +73,18 @@ std::unique_ptr<Model> Model::load(const std::string& gguf_path, const std::stri
     }
     // Packed ternary weights run on the CPU kernel only. Fail at load with a
     // clear message instead of crashing inside a GPU graph.
-    if (m->loader_.config().ternary.present &&
-        std::string(pk::global_backend().device_name()) != "cpu") {
-        PK_LOG("this GGUF holds packed ternary weights, which run on the CPU backend only; "
-               "re-convert with --ternary dequant to use a GPU backend, or set PARAKEET_DEVICE=cpu");
+    const bool packed_cpu = m->loader_.config().ternary.present || m->loader_.config().fivevalue.present;
+    if (packed_cpu && std::string(pk::global_backend().device_name()) != "cpu") {
+        if (m->loader_.config().ternary.present)
+            PK_LOG("this GGUF holds packed ternary weights, which run on the CPU backend only; "
+                   "re-convert with --ternary dequant to use a GPU backend, or set PARAKEET_DEVICE=cpu");
+        else
+            PK_LOG("this GGUF holds packed five-value weights, which run on the CPU backend only; "
+                   "use a dequantized file for a GPU backend, or set PARAKEET_DEVICE=cpu");
         return nullptr;
     }
     // Validate and repack every packed linear now so graph building never throws.
-    if (m->loader_.config().ternary.present) {
+    if (packed_cpu) {
         try {
             ternary_prepare(m->loader_);
         } catch (const std::exception& e) {
@@ -110,7 +114,7 @@ std::unique_ptr<Model> Model::load_vad_only(const std::string& gguf_path, const 
         return nullptr;
     }
     // The slice never carries packed ternary tensors (the slicer refuses them).
-    if (c.ternary.present || m->loader_.has_tensor_with_suffix(".weight_packed")) {
+    if (c.ternary.present || c.fivevalue.present || m->loader_.has_tensor_with_suffix(".weight_packed")) {
         PK_LOG("%s: a VAD-only file cannot hold packed ternary tensors", gguf_path.c_str());
         return nullptr;
     }

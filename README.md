@@ -20,6 +20,7 @@ A C++17/[ggml](https://github.com/ggml-org/ggml) port of NVIDIA's [NeMo](https:/
 
 Latest tagged release: **v0.5.0** (2026-08-01). Entries dated after it are on master, not in a release yet: build from source (see [Build](#build)) or use the `:latest` [Docker images](docs/docker.md).
 
+- 🔊 **Phonon-2.5** (2026-10-24): Fermion Research's retrained 25-language and English-only versions of parakeet-tdt-0.6b-v3, as ordinary F16, Q8_0 and Q4_K files for any backend, or as a 242 MB packed file that runs on the CPU. [docs](docs/phonon.md)
 - 🧬 **Speaker embeddings from the C API** (2026-10-05): `parakeet_capi_speaker_embed_pcm` returns the voice embedding of a clip, from a standalone encoder or a bundle `voice` component. [docs](docs/speaker.md)
 - 🔏 **Speaker fingerprint** (2026-10-04): the speaker registry records which encoder made each voice print and refuses a model mismatch before naming. [docs](docs/diarization.md)
 - 📦 **Bundle GGUF** (2026-10-04): ASR, VAD, diarization, sound events and speaker voice models in one file, with one licence per component; three bundles are published. [docs](docs/bundle.md)
@@ -161,6 +162,7 @@ All models below are published as GGUF in [mudler/parakeet-cpp-gguf](https://hug
 | [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) | Sortformer | n/a | Who spoke when, up to 8 speakers. See [diarization.md](docs/diarization.md) |
 | [parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra) | TDT + VAD head | 0.6B | Moondream, from parakeet-tdt-0.6b-v3. CC-BY-4.0. Not NeMo-validated |
 | [parakeet-redux](https://huggingface.co/moondream/parakeet-redux) | TDT + VAD head | 0.6B | Moondream, ternary encoder. CPU only, offline only. CC-BY-4.0. Not NeMo-validated |
+| [Phonon-2.5](https://huggingface.co/FermionResearch/Phonon-2.5), [Phonon-2.5-English](https://huggingface.co/FermionResearch/Phonon-2.5-English) | TDT | 0.6B | Fermion Research, retrained from parakeet-tdt-0.6b-v3. 25 languages, or English only. The packed file is CPU only and offline only. CC-BY-4.0. Not NeMo-validated, see [phonon.md](docs/phonon.md) |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | VAD | 1.3 MB | MIT. 16 kHz and 8 kHz |
 | [CED](https://huggingface.co/mudler/ced-gguf) | sound events | 6 to 88 MB | 527 classes, from [ced.cpp](https://github.com/localai-org/ced.cpp). See [sound.md](docs/sound.md) |
 
@@ -298,6 +300,7 @@ VAD accuracy, speed and size, Silero against the Parakeet head against whisper.c
 | [vad-benchmarks.md](docs/vad-benchmarks.md) | Every VAD measurement and how to repeat it |
 | [ultra-redux.md](docs/ultra-redux.md) | The Moondream models: files, credits, dequantized Redux |
 | [ternary.md](docs/ternary.md) | Packed ternary format, kernels, limits, speed |
+| [phonon.md](docs/phonon.md) | Phonon-2.5: the container, conversion, parity, WER, the packed files |
 | [bundle.md](docs/bundle.md) | Bundle GGUF format, selection rules, licences, build and verify |
 | [diarization.md](docs/diarization.md) | Diarization, speaker-attributed ASR, encoder fingerprint, speed |
 | [sound.md](docs/sound.md) | Sound events (CED) and the scene stream |
@@ -349,9 +352,9 @@ Tests labelled `model` need a converted checkpoint (set `PARAKEET_TEST_GGUF` and
 
 ## License and credits
 
-parakeet.cpp is released under the [MIT License](LICENSE). The model weights keep the licences of the original models, so check each model card. Most NVIDIA Parakeet models are CC-BY-4.0. `nemotron-3.5-asr-streaming` and Nemotron-3-Diarization are OpenMDW-1.1, `parakeet_realtime_eou_120m-v1` is under the NVIDIA Open Model License, and the Silero VAD files are MIT. Moondream's [parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra) and [parakeet-redux](https://huggingface.co/moondream/parakeet-redux) are CC-BY-4.0: credit Moondream and NVIDIA ([parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)), link the [license](https://creativecommons.org/licenses/by/4.0/), and note that GGUF files made here are converted (and quantized, or dequantized for Redux) copies, not retrained models. The full table is in [docs/licenses.md](docs/licenses.md). A bundle keeps one licence per component (see [bundle.md](docs/bundle.md)).
+parakeet.cpp is released under the [MIT License](LICENSE). The model weights keep the licences of the original models, so check each model card. Most NVIDIA Parakeet models are CC-BY-4.0. `nemotron-3.5-asr-streaming` and Nemotron-3-Diarization are OpenMDW-1.1, `parakeet_realtime_eou_120m-v1` is under the NVIDIA Open Model License, and the Silero VAD files are MIT. Fermion Research's [Phonon-2.5](https://huggingface.co/FermionResearch/Phonon-2.5) and [Phonon-2.5-English](https://huggingface.co/FermionResearch/Phonon-2.5-English) are CC-BY-4.0 too (credit Fermion Research and NVIDIA; their training audio includes CHiME-6 under CC-BY-SA-4.0 and SPGISpeech under Kensho's terms, see [docs/licenses.md](docs/licenses.md)). Moondream's [parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra) and [parakeet-redux](https://huggingface.co/moondream/parakeet-redux) are CC-BY-4.0: credit Moondream and NVIDIA ([parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)), link the [license](https://creativecommons.org/licenses/by/4.0/), and note that GGUF files made here are converted (and quantized, or dequantized for Redux) copies, not retrained models. The full table is in [docs/licenses.md](docs/licenses.md). A bundle keeps one licence per component (see [bundle.md](docs/bundle.md)).
 
-The Parakeet models are by NVIDIA NeMo ([NVIDIA-NeMo/NeMo](https://github.com/NVIDIA-NeMo/NeMo)). Parakeet Ultra and Redux are by [Moondream](https://huggingface.co/moondream), derived from NVIDIA's parakeet-tdt-0.6b-v3. Sound tagging uses [CED](https://github.com/RicherMans/CED) by Heinrich Dinkel and colleagues at Xiaomi. The demo film is Sprite Fright, CC BY 4.0, Blender Studio.
+The Parakeet models are by NVIDIA NeMo ([NVIDIA-NeMo/NeMo](https://github.com/NVIDIA-NeMo/NeMo)). Parakeet Ultra and Redux are by [Moondream](https://huggingface.co/moondream), derived from NVIDIA's parakeet-tdt-0.6b-v3. Phonon-2.5 is by [Fermion Research](https://huggingface.co/FermionResearch), derived from the same model. Sound tagging uses [CED](https://github.com/RicherMans/CED) by Heinrich Dinkel and colleagues at Xiaomi. The demo film is Sprite Fright, CC BY 4.0, Blender Studio.
 
 If you use parakeet.cpp, please cite this repository and the original models:
 

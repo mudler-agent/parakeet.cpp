@@ -251,9 +251,92 @@ should stay below Q8_0 on this CPU, and the end-to-end runs above agree.
 WER on the 100 LibriSpeech utterances of that manifest (plain normalizer, same run as the 8-thread timings):
 F16 1.78, Q8_0 1.78, packed 1.91 (about 2 words more).
 
-**Fused kernel: not written.** The idea is one kernel that reads both planes of a linear in one pass. The
-two-plane version is already faster than Q8_0 on this CPU, so the measurements give no reason for it; it was
-not profiled further. A VNNI or NEON machine might tell another story.
+### Where the time goes, and the fused kernel
+
+Profile first. One thread pinned to one logical CPU, packed file, the first 10 utterances of the manifest
+(70 s of audio), AVX2 kernel, with counters around the three custom ops of a five-value linear
+(the counters were temporary and are not in the tree). The one-minute load was 9 to 10 when the runs started, so read the
+shares, not the milliseconds:
+
+| Part | Time | Share of the run |
+|---|---:|---:|
+| Matmul, plane A (scale lo) | 6.4 s | 40% |
+| Matmul, plane B (scale hi) | 6.4 s | 40% |
+| Activation quantization (once per linear) | 0.09 s | 0.6% |
+| Sum of the two planes | 0.22 s | 1.4% |
+| Everything else (attention, convolutions, subsampling, mel, decoder) | about 2.9 s | 18% |
+
+Two runs gave the same split. The cost is the matmul, and each plane costs the same, so the packed linear is
+two Redux linears. Quantizing the activations once is already free, and the plane sum is small.
+What a fused kernel can save is the sum (1.4%), the intermediate output and part of the loop and
+activation-load work.
+
+`PARAKEET_TERNARY_FUSED=1` switches on a fused AVX2 kernel: one pass over the activations and both planes, the
+integer group sums and the float accumulator of each plane kept apart, one output write. Each plane is scaled and
+accumulated exactly as in the single-plane kernel and the two results are added at the end, so the output is
+bit-identical to two planes plus an add. It is not one shared accumulator, because that would change the
+float rounding. `test_fivevalue` checks the fused kernels against the reference on fixed and random shapes (40
+random N, K, T, with partial row ranges, an all-zero activation row and an outlier): every output float equal, bytes
+outside the range untouched. The encoder output of `speech.wav` and `two_speakers.wav` (mel, layers 0, 11, 23 and the final
+output) is byte-identical with and without the switch, and `test_fivevalue_model` passes with it.
+
+It is not faster end to end, so it is off by default:
+
+- `bench_ternary 4096 1024 100`, 1 thread, interleaved best of 3, load 11 to 15, so indicative only: 9.1 to 9.7 ms for
+  two planes plus add, 8.7 to 9.1 ms fused with two activation rows per tile, 9.7 to 10.5 ms with one or
+  three rows (one earlier run at load 4.5: 9.8 ms and 8.9 ms). 1024 x 4096: 8.0 ms and 8.2 ms. The register file (16 ymm) holds the four int16 accumulators of two
+  planes for two rows and not much more; the work per MAC is about the same as in two passes.
+- End to end, one thread, three rounds (table below): fused 4.07, 4.41, 4.61 RTF against 4.29, 4.53, 4.78 for two planes,
+  that is 3% to 5% slower each time; at 8 threads 8.93, 8.28, 10.96 against 8.27, 8.28, 10.52, within the noise.
+
+Most likely the kernel is limited by vector ALU work (decoding the 2-bit codes and the `maddubs` accumulation), not
+by memory traffic or the sum, which would explain why sharing the activation loads does not help. No hardware
+counters were available to confirm it. A saving would have to come from the decode itself, which means a different
+weight layout, and the layout is shared with Redux.
+
+### Benchmark: packed, Q8_0, F16
+
+Same setup as above, `parakeet-cli bench --decoder tdt` on the first 10 utterances of the manifest (70.0 s of audio),
+one thread pinned to one logical CPU, and 8 threads on CPUs 0 to 7. RTF is audio seconds over the summed `proc_ms` of the
+9 utterances after the first. Three rounds, each round runs every configuration once, in the order of the table.
+Load is the one-minute load average read just before the run. **The host was never quiet: every run started at a load of 3.6
+or more, and all are above the limit of 2 for a usable number.** The figures are for comparing the configurations that ran side by side,
+not for quoting.
+
+| Configuration | Threads | RTF round 1 / 2 / 3 | Load at start, round 1 / 2 / 3 |
+|---|---:|---|---|
+| packed, two planes (default) | 1 | 4.29 / 4.53 / 4.78 | 9.3 / 7.8 / 7.0 |
+| packed, fused (`PARAKEET_TERNARY_FUSED=1`) | 1 | 4.07 / 4.41 / 4.61 | 10.4 / 6.5 / 6.0 |
+| Q8_0 | 1 | 3.49 / 3.53 / 3.78 | 8.1 / 5.4 / 4.8 |
+| F16 | 1 | 4.02 / 4.17 / 4.38 | 7.5 / 6.2 / 3.6 |
+| packed, two planes (default) | 8 | 8.27 / 8.28 / 10.52 | 7.1 / 7.6 / 6.1 |
+| packed, fused | 8 | 8.93 / 8.28 / 10.96 | 5.2 / 5.1 / 7.2 |
+| Q8_0 | 8 | 6.64 / 6.68 / 8.45 | 7.4 / 7.3 / 4.5 |
+| F16 | 8 | 8.20 / 9.74 / 3.10 | 8.8 / 7.9 / 14.2 |
+
+Reading it: every row rises from round to round while the load fell, so compare configurations within a round, not across
+rounds. At one thread the order is packed, then F16, then Q8_0, in all three rounds. Packed beats Q8_0 by 23% to 28% and F16 by
+7% to 9% in the same round. At 8 threads packed is ahead of Q8_0 in every round; against F16 it ties in round 1 (8.27 against
+8.20) and loses in round 2 (8.28 against 9.74); F16's round 3 ran at a load of 14 to 31 and says nothing. So the earlier
+statement stands, that the two-plane version is not slower than Q8_0 on this CPU, and the F16 comparison is open at 8 threads.
+
+Nothing here was measured on a quiet host. The raw per-run logs and the profile counters are not in the repository.
+
+### Accelerators
+
+- **AVX-512 VNNI and NEON dot product: not changed.** The existing single-plane kernels run both planes
+  there. A fused version was not written: the machine used for this work (Ryzen 5 7430U, AVX2 only) cannot run
+  VNNI, and has neither an aarch64 cross compiler nor qemu-user. Code that cannot be compiled and run here is not merged.
+  `TernaryKernel::fn2` is the hook: a kernel that sets it is used when `PARAKEET_TERNARY_FUSED=1` is set. The AVX2 result says to measure
+  before expecting a gain. The VNNI kernel does more MACs per instruction (see the single-thread table in
+  [ternary.md](ternary.md)), so the shared loads and loop work could be a larger share there; that is untested.
+- **GPU: no path, by design.** The packed linears are custom ops with host-side kernels over repacked host
+  memory; the model loader refuses a GPU backend for them, and ggml's CUDA, Metal and Vulkan backends have no
+  op that reads this layout. A clean GPU path means a device kernel for the 2-bit plane layout, planes
+  uploaded as tensors and an op registered in the vendored ggml, which this repository patches only for small fixes.
+  The profile above says what that would buy: the matmul is 80% of the CPU run, and the packed file is 242 MB
+  against 941 MB for Q8_0, so a GPU kernel could only win on memory-bound devices, while the dense files already run
+  on the GPU backends. No GPU was used for this work and no kernel was written for one.
 
 ## Licence
 
@@ -272,7 +355,8 @@ converted files, is a legal question that this project does not settle. See also
 ## Limits
 
 - Packed files: CPU only, offline only, no streaming; the AVX2, AVX-512 VNNI and NEON dot-product kernels
-  are fast, the scalar kernel (MSVC, Windows on ARM) is not. Use a dense file there.
+  are fast, the scalar kernel (MSVC, Windows on ARM) is not. Use a dense file there. Only the AVX2 kernel was run for the
+  five-value path on the machine used here; the VNNI and NEON kernels are the Redux kernels, tested on Redux.
 - The format of the upstream container is marked v1 and the release is days old. The reader refuses
   anything it does not know; check the archive digest before relying on a newer release.
 - The WER figures above come from 30 utterances per language. They do not rank the models.

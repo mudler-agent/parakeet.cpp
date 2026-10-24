@@ -62,6 +62,9 @@ and no `<base>.weight`. Two KVs mark the file: `parakeet.ternary.present`
    then AVX2, then a scalar reference. All kernels are bit-identical to the
    scalar reference. `PARAKEET_TERNARY_KERNEL=scalar|avx2|vnni|neon` forces one
    (an unavailable name falls back to automatic selection with a log line).
+   `PARAKEET_TERNARY_FUSED=1` makes a five-value linear (Phonon-2.5) run both planes in one fused pass where the
+   kernel has one (AVX2 today); the output is bit-identical and it is off by default because it measured no faster,
+   see [phonon.md](phonon.md#where-the-time-goes-and-the-fused-kernel).
    The activation quantizer is picked by CPU features only.
 
 Reference path. Upstream's reference path for Redux is weight-only: the ternary

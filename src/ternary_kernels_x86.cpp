@@ -9,6 +9,9 @@
 namespace pk {
 namespace {
 
+#ifndef PK_FUSED_C
+#define PK_FUSED_C 2
+#endif
 #define PK_TGT_AVX2 __attribute__((target("avx2")))
 #define PK_TGT_512 __attribute__((target("avx2,avx512f,avx512vl,avx512vnni")))
 #define PK_TGT_512F __attribute__((target("avx2,avx512f")))
@@ -187,6 +190,97 @@ PK_TGT_AVX2 void rows_avx2(const TernaryWeight& w, const uint8_t* act, int T, fl
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// AVX2, both planes of a five-value linear in one pass. Each plane keeps its
+// own int16 group accumulators and its own float accumulator, exactly as in
+// tile_avx2, so every value equals the single-plane result; the two scaled
+// results are added once, at the end, as the separate graph add did. What is
+// shared is the broadcast of the activation bytes and the loop and address
+// work, and there is no intermediate output row to write and read back.
+template <int C>
+PK_TGT_AVX2 void tile2_avx2(const TernaryWeight& wl, const TernaryWeight& wh, const uint8_t* act, size_t rb,
+                            int t0, float* y, int b0, unsigned mk) {
+    const int N = wl.N, K = wl.K, G = wl.groups();
+    const __m256i m3 = _mm256_set1_epi8(3);
+    const __m256i ones = _mm256_set1_epi16(1);
+    const int8_t* xr[C];
+    const int32_t* gsr[C];
+    for (int c = 0; c < C; ++c) {
+        const uint8_t* row = act + (size_t)(t0 + c) * rb;
+        xr[c] = reinterpret_cast<const int8_t*>(row);
+        gsr[c] = reinterpret_cast<const int32_t*>(row + K + 4);
+    }
+    alignas(32) float facc[2][C][16] = {};
+    for (int g = 0; g < G; ++g) {
+        __m256i ia[2][C][2];
+        for (int q = 0; q < 2; ++q)
+            for (int c = 0; c < C; ++c) ia[q][c][0] = ia[q][c][1] = _mm256_setzero_si256();
+        const uint8_t* pl = wl.planes.data() + ((size_t)b0 * G + g) * 512;
+        const uint8_t* ph = wh.planes.data() + ((size_t)b0 * G + g) * 512;
+        for (int s = 0; s < 8; ++s) {
+            const __m256i l0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(pl + s * 64));
+            const __m256i l1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(pl + s * 64 + 32));
+            const __m256i h0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ph + s * 64));
+            const __m256i h1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ph + s * 64 + 32));
+            for (int p = 0; p < 4; ++p) {
+                const __m256i wl0 = _mm256_and_si256(_mm256_srli_epi32(l0, 2 * p), m3);
+                const __m256i wl1 = _mm256_and_si256(_mm256_srli_epi32(l1, 2 * p), m3);
+                const __m256i wh0 = _mm256_and_si256(_mm256_srli_epi32(h0, 2 * p), m3);
+                const __m256i wh1 = _mm256_and_si256(_mm256_srli_epi32(h1, 2 * p), m3);
+                for (int c = 0; c < C; ++c) {
+                    const __m256i a = _mm256_set1_epi32(load_i32(xr[c] + (size_t)g * 128 + s * 16 + 4 * p));
+                    ia[0][c][0] = _mm256_add_epi16(ia[0][c][0], _mm256_maddubs_epi16(wl0, a));
+                    ia[0][c][1] = _mm256_add_epi16(ia[0][c][1], _mm256_maddubs_epi16(wl1, a));
+                    ia[1][c][0] = _mm256_add_epi16(ia[1][c][0], _mm256_maddubs_epi16(wh0, a));
+                    ia[1][c][1] = _mm256_add_epi16(ia[1][c][1], _mm256_maddubs_epi16(wh1, a));
+                }
+            }
+        }
+        const float* scp[2] = {&wl.scales[((size_t)b0 * G + g) * kTernaryRowBlock],
+                               &wh.scales[((size_t)b0 * G + g) * kTernaryRowBlock]};
+        for (int q = 0; q < 2; ++q) {
+            const __m256 sc0 = _mm256_loadu_ps(scp[q]), sc1 = _mm256_loadu_ps(scp[q] + 8);
+            for (int c = 0; c < C; ++c) {
+                const __m256i gs = _mm256_set1_epi32(gsr[c][g]);
+                const __m256 f0 = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_madd_epi16(ia[q][c][0], ones), gs));
+                const __m256 f1 = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_madd_epi16(ia[q][c][1], ones), gs));
+                _mm256_store_ps(facc[q][c], _mm256_add_ps(_mm256_load_ps(facc[q][c]), _mm256_mul_ps(sc0, f0)));
+                _mm256_store_ps(facc[q][c] + 8,
+                                _mm256_add_ps(_mm256_load_ps(facc[q][c] + 8), _mm256_mul_ps(sc1, f1)));
+            }
+        }
+    }
+    for (int c = 0; c < C; ++c) {
+        const __m256 sa = _mm256_set1_ps(*reinterpret_cast<const float*>(xr[c] + K));
+        alignas(32) float out[16];
+        for (int h = 0; h < 2; ++h) {
+            const __m256 pa = _mm256_mul_ps(_mm256_load_ps(facc[0][c] + 8 * h), sa);
+            const __m256 pb = _mm256_mul_ps(_mm256_load_ps(facc[1][c] + 8 * h), sa);
+            _mm256_store_ps(out + 8 * h, _mm256_add_ps(pa, pb));
+        }
+        float* yr = y + (size_t)(t0 + c) * N + (size_t)b0 * kTernaryRowBlock;
+        if (mk == 0xFFFFu) std::memcpy(yr, out, sizeof(out));
+        else
+            for (int i = 0; i < kTernaryRowBlock; ++i)
+                if (mk >> i & 1u) yr[i] = out[i];
+    }
+}
+
+PK_TGT_AVX2 void rows2_avx2(const TernaryWeight& wl, const TernaryWeight& wh, const uint8_t* act, int T,
+                            float* y, int r0, int r1) {
+    if (r0 >= r1 || T <= 0) return;
+    constexpr int C = PK_FUSED_C;
+    const size_t rb = ternary_act_row_bytes(wl.K);
+    const int bl = (r1 - 1) / kTernaryRowBlock;
+    for (int b = r0 / kTernaryRowBlock; b <= bl; ++b) {
+        const unsigned mk = block_mask(b, r0, r1);
+        int t0 = 0;
+        for (; t0 + C <= T; t0 += C) tile2_avx2<C>(wl, wh, act, rb, t0, y, b, mk);
+        for (; t0 < T; ++t0) tile2_avx2<1>(wl, wh, act, rb, t0, y, b, mk);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Activation quantization, byte-identical to ternary_quant_rows_ref. The max
 // of |x| is exact in any order, and max_ps(v, m) returns m for a NaN v, as
@@ -281,7 +375,7 @@ const TernaryKernel* ternary_kernel_x86_vnni() {
 }
 
 const TernaryKernel* ternary_kernel_x86_avx2() {
-    static const TernaryKernel k{"avx2", rows_avx2};
+    static const TernaryKernel k{"avx2", rows_avx2, rows2_avx2};
     __builtin_cpu_init();
     return __builtin_cpu_supports("avx2") ? &k : nullptr;
 }

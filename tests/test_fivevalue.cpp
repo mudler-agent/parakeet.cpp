@@ -5,7 +5,9 @@
 #include "ternary.hpp"
 #include "ternary_kernels.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <random>
@@ -127,6 +129,52 @@ static void run_case(int N, int K, int T, unsigned seed, int pct_hi, int pct_zer
     }
 }
 
+// The fused two-plane kernels write the same bytes as the two planes run one after
+// the other and added, for the whole output and for any row range.
+static void fused_case(int N, int K, int T, unsigned seed, int pct_hi, int pct_zero) {
+    const Encoded e = make(N, K, seed, pct_hi, pct_zero);
+    TernaryWeight A, B;
+    fivevalue_split(e.codes.data(), e.hibits.data(), e.hibits.size(), e.lo.data(), e.hi.data(), N, K, A, B);
+    std::mt19937 rng(seed * 7 + 3);
+    std::uniform_real_distribution<float> xr(-4.0f, 4.0f);
+    std::vector<float> x((size_t)T * K);
+    for (auto& v : x) v = xr(rng);
+    if (T > 2) std::fill(x.begin() + K, x.begin() + 2 * (size_t)K, 0.0f);   // an all-zero row: scale 0
+    if (T > 3) x[(size_t)3 * K + 5] = 900.0f;                                // one large outlier
+    std::vector<uint8_t> act((size_t)T * ternary_act_row_bytes(K));
+    ternary_quant_rows(x.data(), K, 0, T, act.data());
+    // expected: ya + yb, where each plane is the reference kernel
+    std::vector<float> ya((size_t)T * N), yb((size_t)T * N), want((size_t)T * N);
+    ternary_matmul_rows_ref(A, act.data(), T, ya.data(), 0, N);
+    ternary_matmul_rows_ref(B, act.data(), T, yb.data(), 0, N);
+    for (size_t i = 0; i < want.size(); ++i) want[i] = ya[i] + yb[i];
+    auto same = [&](const std::vector<float>& got, int r0, int r1) {
+        for (int t = 0; t < T; ++t)
+            for (int n = r0; n < r1; ++n)
+                if (std::memcmp(&got[(size_t)t * N + n], &want[(size_t)t * N + n], 4) != 0) return false;
+        return true;
+    };
+    const int ranges[][2] = {{0, N}, {N / 3, N}, {0, N / 2}, {N > 5 ? 3 : 0, N > 9 ? N - 4 : N}};
+    for (const auto& rg : ranges) {
+        std::vector<float> y((size_t)T * N, -7.0f);
+        ternary_matmul2_rows_ref(A, B, act.data(), T, y.data(), rg[0], rg[1]);
+        CHECK(same(y, rg[0], rg[1]));
+        for (const TernaryKernel* k : ternary_all_kernels()) {
+            std::vector<float> z((size_t)T * N, -7.0f);
+            if (k->fn2) k->fn2(A, B, act.data(), T, z.data(), rg[0], rg[1]);
+            else continue;
+            CHECK(same(z, rg[0], rg[1]));
+            // rows outside the range stay untouched
+            for (int t = 0; t < T; ++t)
+                for (int n = 0; n < N; ++n)
+                    if (n < rg[0] || n >= rg[1]) CHECK(z[(size_t)t * N + n] == -7.0f);
+        }
+        std::vector<float> y2((size_t)T * N, -7.0f);
+        ternary_matmul2_rows(A, B, act.data(), T, y2.data(), rg[0], rg[1]);   // dispatching entry point
+        CHECK(same(y2, rg[0], rg[1]));
+    }
+}
+
 template <class F> static bool throws(F f) {
     try {
         f();
@@ -143,6 +191,19 @@ int main() {
     run_case(16, 128, 2, 4, 100, 50);     // every nonzero weight is hi
     run_case(5, 128, 1, 5, 30, 100);      // all zeros: empty flag stream
     run_case(48, 1024, 2, 6, 25, 35);     // a real width; 1024 is not a multiple of 5
+
+    // fused two-plane kernels: fixed shapes, then random ones
+    fused_case(32, 128, 3, 11, 30, 30);
+    fused_case(17, 256, 5, 12, 50, 10);
+    fused_case(16, 384, 1, 13, 0, 50);
+    fused_case(48, 1024, 4, 14, 25, 35);
+    {
+        std::mt19937 rng(20241024);
+        for (int i = 0; i < 40; ++i) {
+            const int N = 1 + (int)(rng() % 90), K = 128 * (1 + (int)(rng() % 6)), T = 1 + (int)(rng() % 7);
+            fused_case(N, K, T, 100 + i, (int)(rng() % 101), (int)(rng() % 101));
+        }
+    }
 
     // malformed input is rejected
     const Encoded e = make(16, 128, 9, 30, 30);

@@ -71,6 +71,18 @@ void ternary_matmul_rows_ref(const TernaryWeight& w, const uint8_t* act, int T, 
 void ternary_matmul_rows(const TernaryWeight& w, const uint8_t* act, int T, float* y,
                          int r0, int r1);
 const char* ternary_kernel_name();
+// Both planes of a five-value linear in one pass. Writes the same bytes as
+// ternary_matmul_rows on each plane followed by an add of the two results.
+// ternary_fused_available() is true only when the kernel in use has a fused version
+// AND PARAKEET_TERNARY_FUSED is set: the fused AVX2 kernel measured no faster end to
+// end than two planes plus an add (see docs/phonon.md), so the graph uses it only on
+// request. ternary_matmul2_rows runs the two planes one after the other when the
+// kernel has no fused version.
+bool ternary_fused_available();
+void ternary_matmul2_rows_ref(const TernaryWeight& lo, const TernaryWeight& hi, const uint8_t* act, int T,
+                              float* y, int r0, int r1);
+void ternary_matmul2_rows(const TernaryWeight& lo, const TernaryWeight& hi, const uint8_t* act, int T,
+                          float* y, int r0, int r1);
 
 // Five-value linears (Phonon-2.5). Each weight is 0, +-lo[row] or +-hi[row], so
 // W = lo * A + hi * B where A and B are ternary matrices that never share a

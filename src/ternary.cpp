@@ -294,6 +294,36 @@ void ternary_matmul_rows(const TernaryWeight& w, const uint8_t* act, int T, floa
 
 const char* ternary_kernel_name() { return pick_kernel()->name; }
 
+bool ternary_fused_available() {
+    static const bool on = pick_kernel()->fn2 != nullptr && std::getenv("PARAKEET_TERNARY_FUSED") != nullptr;
+    return on;
+}
+
+void ternary_matmul2_rows_ref(const TernaryWeight& lo, const TernaryWeight& hi, const uint8_t* act, int T,
+                              float* y, int r0, int r1) {
+    const size_t n = (size_t)T * lo.N;
+    std::vector<float> b(n);
+    ternary_matmul_rows_ref(lo, act, T, y, r0, r1);
+    ternary_matmul_rows_ref(hi, act, T, b.data(), r0, r1);
+    for (int t = 0; t < T; ++t)
+        for (int i = r0; i < r1; ++i) y[(size_t)t * lo.N + i] += b[(size_t)t * lo.N + i];
+}
+
+void ternary_matmul2_rows(const TernaryWeight& lo, const TernaryWeight& hi, const uint8_t* act, int T,
+                          float* y, int r0, int r1) {
+    const TernaryKernel* k = pick_kernel();
+    if (k->fn2) {
+        k->fn2(lo, hi, act, T, y, r0, r1);
+        return;
+    }
+    const size_t n = (size_t)T * lo.N;
+    std::vector<float> b(n);
+    k->fn(lo, act, T, y, r0, r1);
+    k->fn(hi, act, T, b.data(), r0, r1);
+    for (int t = 0; t < T; ++t)
+        for (int i = r0; i < r1; ++i) y[(size_t)t * lo.N + i] += b[(size_t)t * lo.N + i];
+}
+
 namespace {
 
 // The two planes of one five-value linear: lo holds the weights that use the
@@ -529,6 +559,18 @@ void op_matmul(ggml_tensor* dst, int ith, int nth, void* ud) {
                         static_cast<float*>(dst->data), r0, r1);
 }
 
+// Op 2 for five-value linears: both planes in one pass. src0 is the quantized
+// activation tensor, userdata points to the two planes.
+void op_matmul2(ggml_tensor* dst, int ith, int nth, void* ud) {
+    const FiveValuePair& p = *static_cast<const FiveValuePair*>(ud);
+    const TernaryWeight& w = *p.lo;
+    const int T = (int)ggml_nrows(dst);
+    const int r0 = (int)((int64_t)w.N * ith / nth);
+    const int r1 = (int)((int64_t)w.N * (ith + 1) / nth);
+    ternary_matmul2_rows(w, *p.hi, static_cast<const uint8_t*>(dst->src[0]->data), T,
+                         static_cast<float*>(dst->data), r0, r1);
+}
+
 }  // namespace
 
 std::string ternary_flag_consistency_error(const ModelLoader& ml) {
@@ -592,6 +634,9 @@ ggml_tensor* ternary_linear(ggml_context* ctx, const ModelLoader& ml, const std:
     ggml_tensor* act = ggml_custom_4d(ctx, GGML_TYPE_I8, (int64_t)ternary_act_row_bytes(w.K), T, 1, 1,
                                       a1, 1, op_quant, GGML_N_TASKS_MAX, nullptr);
     ggml_tensor* a2[1] = {act};
+    if (five && ternary_fused_available())
+        return ggml_custom_4d(ctx, GGML_TYPE_F32, w.N, x->ne[1], x->ne[2], x->ne[3], a2, 1, op_matmul2,
+                              GGML_N_TASKS_MAX, const_cast<FiveValuePair*>(fv));
     ggml_tensor* y = ggml_custom_4d(ctx, GGML_TYPE_F32, w.N, x->ne[1], x->ne[2], x->ne[3], a2, 1, op_matmul,
                                     GGML_N_TASKS_MAX, const_cast<TernaryWeight*>(&w));
     if (!five) return y;

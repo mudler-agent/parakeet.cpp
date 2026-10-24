@@ -172,6 +172,38 @@ int main(int argc, char** argv) {
         std::printf("%-8s N=%d K=%d T=%d  %8.3f ms  %7.2f GMAC/s\n", k->name, N, K, T, sec * 1e3,
                     (double)N * K * T / sec / 1e9);
     }
+    {
+        // five-value linear: two planes (a second random weight stands in for plane hi), run one
+        // after the other plus the add, against the fused kernel
+        std::vector<uint8_t> q2((size_t)N * nb);
+        for (auto& b : q2) b = (uint8_t)(rng() % 243);
+        TernaryWeight w2;
+        ternary_repack(q2.data(), s.data(), N, K, w2);
+        std::vector<float> y2((size_t)T * N);
+        for (const TernaryKernel* k : ternary_all_kernels()) {
+            if (!k->fn2) continue;
+            auto run_two = [&] {
+                k->fn(w, act.data(), T, y.data(), 0, N);
+                k->fn(w2, act.data(), T, y2.data(), 0, N);
+                for (size_t i = 0; i < y.size(); ++i) y[i] += y2[i];
+            };
+            auto run_fused = [&] { k->fn2(w, w2, act.data(), T, y.data(), 0, N); };
+            for (int rep = 0; rep < 3; ++rep) {   // interleaved, best of three
+                static double best_two = 1e9, best_fused = 1e9;
+                run_two();
+                auto t0 = std::chrono::steady_clock::now();
+                for (int r = 0; r < reps; ++r) run_two();
+                best_two = std::min(best_two, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps);
+                run_fused();
+                t0 = std::chrono::steady_clock::now();
+                for (int r = 0; r < reps; ++r) run_fused();
+                best_fused = std::min(best_fused, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps);
+                if (rep == 2)
+                    std::printf("%-8s N=%d K=%d T=%d  two planes + add %8.3f ms   fused %8.3f ms   (best of 3)\n", k->name, N,
+                                K, T, best_two * 1e3, best_fused * 1e3);
+            }
+        }
+    }
     for (ggml_type wt : {GGML_TYPE_Q8_0, GGML_TYPE_F16}) {
         const double sec = time_ggml_mul_mat(wt, N, K, T, reps, x, rng);
         std::printf("ggml_%-3s N=%d K=%d T=%d  %8.3f ms  %7.2f GMAC/s\n", ggml_type_name(wt), N, K, T, sec * 1e3,

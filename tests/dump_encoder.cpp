@@ -14,9 +14,11 @@
 // row-major [T', d_model].
 #include "audio_io.hpp"
 #include "encoder.hpp"
+#include "ggml_graph.hpp"
 #include "mel.hpp"
 #include "model_loader.hpp"
 #include <cstdio>
+#include <memory>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -40,7 +42,7 @@ static bool read_f32(const std::string& path, std::vector<float>& v) {
     return ok;
 }
 
-int main(int argc, char** argv) {
+static int run(int argc, char** argv) {
     std::string mel_dir;
     std::vector<int> layers;
     int a0 = 1;
@@ -62,7 +64,10 @@ int main(int argc, char** argv) {
     }
     pk::ModelLoader ml;
     if (!ml.load(argv[a0])) return 1;
-    pk::MelFrontend mel(ml);
+    // With --mel-dir the features come from disk, so the host mel kernel (which reads the
+    // filterbank from host memory, not from a device buffer) is not built.
+    std::unique_ptr<pk::MelFrontend> mel;
+    if (mel_dir.empty()) mel.reset(new pk::MelFrontend(ml));
     pk::Encoder enc(ml);
     const std::string out_dir = argv[a0 + 1];
     for (int i = a0 + 2; i < argc; ++i) {
@@ -76,14 +81,19 @@ int main(int argc, char** argv) {
         stem = stem.substr(0, stem.find_last_of('.'));
         std::vector<float> feats;
         int n_mels = 0, T = 0;
-        mel.compute(a.samples, feats, n_mels, T);
-        if (!write_f32(out_dir + "/" + stem + ".mel.f32", feats)) return 1;
+        if (mel) {
+            mel->compute(a.samples, feats, n_mels, T);
+            if (!write_f32(out_dir + "/" + stem + ".mel.f32", feats)) return 1;
+        } else {
+            n_mels = (int)ml.config().n_mels;
+        }
         if (!mel_dir.empty()) {
             if (!read_f32(mel_dir + "/" + stem + ".mel.f32", feats) || feats.size() % (size_t)n_mels) {
                 std::fprintf(stderr, "dump_encoder: cannot read features for %s\n", stem.c_str());
                 return 1;
             }
             T = (int)(feats.size() / (size_t)n_mels);
+            if (!mel && !write_f32(out_dir + "/" + stem + ".mel.f32", feats)) return 1;
         }
         std::vector<float> out;
         int d = 0, To = 0;
@@ -99,4 +109,11 @@ int main(int argc, char** argv) {
         std::printf("%s d_model=%d frames=%d\n", stem.c_str(), d, To);
     }
     return 0;
+}
+
+int main(int argc, char** argv) {
+    const int rc = run(argc, argv);
+    // The model objects are gone: release the device buffers while the driver is alive.
+    pk::shutdown_backend();
+    return rc;
 }

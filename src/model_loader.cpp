@@ -6,7 +6,12 @@
 #include "ggml-alloc.h"
 #include "ggml-cpu.h"
 #include "gguf.h"
+#include "ternary.hpp"
+#include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <mutex>
+#include <thread>
 #include <cstring>
 #include <vector>
 #include <utility>
@@ -117,7 +122,25 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
     // backend, upload each tensor's bytes from the host source, and repoint the
     // name->tensor map at the device tensors. The host context is only a staging
     // allocation and can be released after all uploads complete.
-    const size_t n = tensors_.size();
+    // A five-value linear is stored as three small tensors that only the CPU
+    // kernels read. On a device it becomes one ordinary <base>.weight (F16, or F32 for
+    // the pointwise convolutions), the same values and types a dequantized file holds, so the graph takes the dense path.
+    std::vector<std::string> five_bases;
+    for (auto& kv : tensors_) {
+        const std::string& nm = kv.first;
+        static const std::string suf = ".fvcodes";
+        if (nm.size() > suf.size() && nm.compare(nm.size() - suf.size(), suf.size(), suf) == 0)
+            five_bases.push_back(nm.substr(0, nm.size() - suf.size()));
+    }
+    std::sort(five_bases.begin(), five_bases.end());
+    auto is_five_part = [&](const std::string& nm) {
+        for (const char* suf : {".fvcodes", ".fvhi", ".fvscale"}) {
+            const size_t l = std::strlen(suf);
+            if (nm.size() > l && nm.compare(nm.size() - l, l, suf) == 0) return true;
+        }
+        return false;
+    };
+    const size_t n = tensors_.size() + five_bases.size();
     struct ggml_init_params dp = {
         /*.mem_size  =*/ ggml_tensor_overhead() * (n + 8),
         /*.mem_buffer=*/ nullptr,
@@ -129,16 +152,60 @@ bool ModelLoader::realize_weights(ggml_backend_t backend){
     std::vector<std::pair<ggml_tensor*, const void*>> ups; ups.reserve(n);
     std::unordered_map<std::string, ggml_tensor*> devmap; devmap.reserve(n);
     for (auto& kv : tensors_) {
+        if (is_five_part(kv.first)) continue;
         ggml_tensor* s = kv.second;
         ggml_tensor* d = ggml_new_tensor(device_ctx_, s->type, GGML_MAX_DIMS, s->ne);
         ggml_set_name(d, kv.first.c_str());
         devmap.emplace(kv.first, d);
         ups.emplace_back(d, s->data);   // host source (valid in ctx_ mem buffer)
     }
+    std::vector<std::pair<ggml_tensor*, std::string>> five_dev;   // F16 weight, base name
+    for (const std::string& base : five_bases) {
+        // The shape comes from the model config, so a bad file fails here with a message.
+        int64_t N = -1, K = -1;
+        fivevalue_linear_shape(*this, base, N, K);
+        if (N <= 0 || K <= 0) { PK_LOG("realize_weights: %s is not an encoder linear", base.c_str()); return false; }
+        // The same types a dequantized file uses, so both run the same kernels.
+        ggml_tensor* d = ggml_new_tensor_2d(device_ctx_, fivevalue_linear_is_conv(base) ? GGML_TYPE_F32 : GGML_TYPE_F16, K, N);
+        const std::string wname = base + ".weight";
+        ggml_set_name(d, wname.c_str());
+        devmap.emplace(wname, d);
+        five_dev.emplace_back(d, base);
+    }
     ggml_backend_buffer_t wb = ggml_backend_alloc_ctx_tensors(device_ctx_, backend);
     if(!wb){ PK_LOG("realize_weights: alloc_ctx_tensors failed"); return false; }
     for (auto& pr : ups)
         ggml_backend_tensor_set(pr.first, pr.second, 0, ggml_nbytes(pr.first));
+    // Expand the five-value linears a few at a time on worker threads and upload each.
+    {
+        std::atomic<size_t> next{0};
+        std::mutex mu;
+        std::string err;
+        auto worker = [&] {
+            std::vector<uint8_t> w;
+            for (size_t k; (k = next.fetch_add(1)) < five_dev.size();) {
+                try {
+                    fivevalue_linear_dense(*this, five_dev[k].second, five_dev[k].first->type == GGML_TYPE_F32, w);
+                    std::lock_guard<std::mutex> lk(mu);   // one upload at a time
+                    ggml_backend_tensor_set(five_dev[k].first, w.data(), 0, ggml_nbytes(five_dev[k].first));
+                } catch (const std::exception& e) {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (err.empty()) err = five_dev[k].second + ": " + e.what();
+                }
+            }
+        };
+        const unsigned hc = std::thread::hardware_concurrency();
+        const size_t nth = std::min<size_t>(hc ? hc : 1u, 8u);
+        std::vector<std::thread> pool;
+        for (size_t t = 1; t < nth; ++t) pool.emplace_back(worker);
+        worker();
+        for (std::thread& th : pool) th.join();
+        if (!err.empty()) {
+            PK_LOG("realize_weights: five-value expand failed: %s", err.c_str());
+            ggml_backend_buffer_free(wb);
+            return false;
+        }
+    }
     tensors_.swap(devmap);   // graphs now reference the device-resident tensors
 
     // The device tensors and their backend buffer own everything needed for

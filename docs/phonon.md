@@ -33,9 +33,9 @@ Converted here, not trained. Credit Fermion Research and NVIDIA, see [Licence](#
 | File | Source | Form | Runs on |
 |---|---|---|---|
 | `phonon-2.5-f16.gguf`, `-q8_0`, `-q4_k` | Phonon-2.5 (25 languages) | the container expanded to ordinary weights, then F16, Q8_0 or Q4_K | any backend |
-| `phonon-2.5-packed.gguf` | Phonon-2.5 | the five-value encoder kept packed, see [Packed files](#packed-files-five-value-encoder-cpu) | CPU only, offline only |
+| `phonon-2.5-packed.gguf` | Phonon-2.5 | the five-value encoder kept packed, see [Packed files](#packed-files-five-value-encoder) | any backend (a GPU gets dense weights, see [below](#packed-files-on-a-gpu)), offline only |
 | `phonon-2.5-english-f16.gguf`, `-q8_0`, `-q4_k` | Phonon-2.5-English | same as the multilingual ones | any backend |
-| `phonon-2.5-english-packed.gguf` | Phonon-2.5-English | same | CPU only, offline only |
+| `phonon-2.5-english-packed.gguf` | Phonon-2.5-English | same | any backend, offline only |
 
 The sizes and SHA-256 sums of the published files are in
 [models/MANIFEST.md](../models/MANIFEST.md).
@@ -162,7 +162,7 @@ Phonon-2.5-English on the 30 English utterances: F16 5.67, Q8_0 5.67, Q4_K 5.37 
 the multilingual model scores 4.78 on the same utterances and v3 5.67). That is a difference
 of 6 words, so it says nothing about which model is better.
 
-## Packed files (five-value encoder, CPU)
+## Packed files (five-value encoder)
 
 `--five-value keep` keeps the 264 five-value linears as the bytes Fermion ships, instead of
 expanding them (`phonon-2.5-packed.gguf`, `phonon-2.5-english-packed.gguf`). The converter also writes
@@ -202,6 +202,24 @@ What was checked, with the F16 file as the reference:
 - WER on the FLEURS subset above: packed 5.65 (MEAN) and 5.47 pooled, against F16 5.59 and 5.42. The
   paired bootstrap difference packed minus F16 is +0.05 points, interval -0.17 to +0.28. For
   Phonon-2.5-English the packed file scores 5.67 on the 30 English utterances, like its F16 file.
+
+### Packed files on a GPU
+
+On a GPU backend the engine expands the packed matrices to the weights of the F16 file while it uploads
+them, so the GPU holds 1.4 GB and runs the F16 graph. The packed file is then only a smaller download.
+Checked on two CUDA devices (Arm SoCs with an integrated GPU, compute capability 8.7 and 11.0), with the
+log-mel features of the CPU run as input to both:
+
+- Encoder output of the packed file and of the F16 file on the same device: bit identical (maximum
+  difference 0) on `speech.wav` and `two_speakers.wav`. Same token ids.
+- Packed file on the GPU against the packed file on the CPU: relative L2 difference 8.6% to 10.4%, the
+  int8 activation quantization of the CPU path (see above). Token ids identical on both clips.
+- F16 file on the GPU against the F16 file on the CPU: 0.6% to 1.9% (F16 activations in the GPU matrix
+  products). Token ids identical.
+- A ROCm device was not tested.
+
+`PARAKEET_DEVICE=cpu` runs the packed file on the CPU kernels instead. Details in
+[ternary.md](ternary.md#five-value-files-on-a-gpu).
 
 ### Speed
 

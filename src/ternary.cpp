@@ -483,6 +483,19 @@ const FiveValuePair& five_for(const ModelLoader& ml, const std::string& base) {
     return store.five.emplace(base, std::move(p)).first->second;
 }
 
+// The (N, K) shape of an encoder linear from its layer name; -1 when the name matches none.
+void shape_of_linear(const ModelLoader& ml, const std::string& base, int64_t& N, int64_t& K) {
+    N = -1;
+    K = -1;
+    for (const LinearShape& l : encoder_linears(ml.config())) {
+        const std::string suffix = std::string(".") + l.name;
+        if (base.size() > suffix.size() && base.compare(base.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            N = l.N;
+            K = l.K;
+        }
+    }
+}
+
 // Worker count for the load-time repack: PARAKEET_REPACK_THREADS, else
 // min(hardware_concurrency, 8). 1 selects the serial path.
 int repack_threads() {
@@ -532,6 +545,34 @@ std::string ternary_flag_consistency_error(const ModelLoader& ml) {
     if (fflag && !five)
         return "parakeet.fivevalue.present is set but the GGUF holds no five-value tensors (.fvcodes)";
     return "";
+}
+
+void fivevalue_linear_shape(const ModelLoader& ml, const std::string& base, int64_t& N, int64_t& K) {
+    shape_of_linear(ml, base, N, K);
+}
+
+bool fivevalue_linear_is_conv(const std::string& base) {
+    for (const char* suf : {".conv.pointwise_conv1", ".conv.pointwise_conv2"}) {
+        const size_t l = std::strlen(suf);
+        if (base.size() > l && base.compare(base.size() - l, l, suf) == 0) return true;
+    }
+    return false;
+}
+
+void fivevalue_linear_dense(const ModelLoader& ml, const std::string& base, bool as_f32,
+                            std::vector<uint8_t>& out) {
+    int64_t N = -1, K = -1;
+    shape_of_linear(ml, base, N, K);
+    TernaryJob j = make_five_job(ml, base, N, K);  // validates the three tensors first
+    std::vector<float> w;
+    fivevalue_dequant(j.q, j.hib, j.hib_bytes, j.s, j.s + j.N, j.N, j.K, w);
+    if (as_f32) {
+        out.resize(w.size() * sizeof(float));
+        std::memcpy(out.data(), w.data(), out.size());
+    } else {
+        out.resize(w.size() * sizeof(ggml_fp16_t));
+        ggml_fp32_to_fp16_row(w.data(), reinterpret_cast<ggml_fp16_t*>(out.data()), (int64_t)w.size());
+    }
 }
 
 bool has_ternary(const ModelLoader& ml, const std::string& base) {

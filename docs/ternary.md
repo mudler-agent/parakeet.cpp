@@ -263,9 +263,10 @@ allowlisted linears with `--dtype f16`). A file without the flag loads exactly a
    activation quantization as Redux. The reference for this engine is the dequantized file; the
    packed file is checked against it by transcripts.
 
-Limits are those of Redux: CPU only, offline only (`StreamingEncoder` refuses the file), the
-original bytes stay resident next to the repacked planes (4 bits per weight for the two planes, on top
-of the about 2.1 bits per weight of the file), and `parakeet-cli quantize` copies the three tensors unchanged.
+Limits are those of Redux, except that a GPU backend is supported (next section): offline only
+(`StreamingEncoder` refuses the file), on the CPU the original bytes stay resident next to the repacked
+planes (4 bits per weight for the two planes, on top of the about 2.1 bits per weight of the file), and
+`parakeet-cli quantize` copies the three tensors unchanged.
 The scalar kernel is selected on MSVC builds, Windows on ARM and aarch64 without dotprod; use a
 dequantized file there.
 
@@ -276,6 +277,32 @@ overlap, and that the two-plane product with the quantized activations equals th
 of the dequantized weights. `tests/test_fivevalue_model.cpp` (`PARAKEET_TEST_GGUF_PHONON_KEEP`,
 `PARAKEET_TEST_GGUF_PHONON_DEQ`) requires the same transcripts from the packed and the dequantized
 file on the test clips, and batch equal to per-item.
+
+### Five-value files on a GPU
+
+The two-plane kernels exist for the CPU only. When the compute device is a GPU backend, the loader
+does not repack the planes. It expands each of the 264 matrices to dense weights while it uploads the
+model: F32 for the two pointwise convolutions and F16 for the other nine linears of a block, the types
+the dequantized F16 file uses for the same tensors. The packed bytes are not kept, so the GPU holds the
+same weights as the F16 file (1.4 GB, not 242 MB) and runs the same graph and kernels. Every value is
+exactly representable in F16 (it is `lo` or `hi` of its row, which are F16 numbers), so the expansion is
+lossless. The expansion adds 0.1 s to 0.3 s to the load on the devices tried.
+
+Consequences:
+
+- The GPU result is the result of the dequantized file on that device (the encoder output was bit
+  identical, same transcripts and token ids). It is not the CPU packed result: that path quantizes the
+  activations to int8, which the GPU path does not, so the two differ by the 8% to 11% relative L2
+  difference listed in [phonon.md](phonon.md), with identical token ids on the test clips.
+- Packed Redux files are still refused on a GPU. Set `PARAKEET_DEVICE=cpu` to keep running a packed
+  file on the CPU when the build has a GPU backend.
+- A GPU path that keeps the packed bytes on the device would need a new ggml kernel for the two-plane
+  layout. It would save memory only. It is not implemented.
+
+`tests/test_fivevalue_gpu.cpp` (same two environment variables) loads the packed file on the GPU
+backend, requires the reference transcript for `speech.wav`, and requires the same transcripts as the
+dequantized file on the same device. It exits with the skip code 77 when the compute device is the CPU,
+so the CPU suite is unchanged.
 
 ## VAD head wiring
 
@@ -822,5 +849,5 @@ ctest --test-dir build -R test_fivevalue$ --output-on-failure  # five-value spli
 
 PARAKEET_TEST_GGUF_PHONON_KEEP=<phonon --five-value keep gguf> \
 PARAKEET_TEST_GGUF_PHONON_DEQ=<phonon dequantized f16 gguf> \
-    ctest --test-dir build -R test_fivevalue_model --output-on-failure
+    ctest --test-dir build -R 'test_fivevalue_(model|gpu)' --output-on-failure   # _gpu skips on a CPU build
 ```

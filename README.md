@@ -20,7 +20,7 @@ A C++17/[ggml](https://github.com/ggml-org/ggml) port of NVIDIA's [NeMo](https:/
 
 Latest tagged release: **v0.5.0** (2026-08-01). Entries dated after it are on master, not in a release yet: build from source (see [Build](#build)) or use the `:latest` [Docker images](docs/docker.md).
 
-- 🔊 **Phonon-2.5** (2026-10-24): Fermion Research's retrained 25-language and English-only versions of parakeet-tdt-0.6b-v3, as ordinary F16, Q8_0 and Q4_K files for any backend, or as a 242 MB packed file that runs on the CPU. [docs](docs/phonon.md)
+- 🔊 **Phonon-2.5** (2026-10-24): Fermion Research's retrained 25-language and English-only versions of parakeet-tdt-0.6b-v3, as ordinary F16, Q8_0 and Q4_K files for any backend, or as a 242 MB packed file (CPU kernels, or expanded to dense weights on a GPU). [docs](docs/phonon.md)
 - 🧬 **Speaker embeddings from the C API** (2026-10-05): `parakeet_capi_speaker_embed_pcm` returns the voice embedding of a clip, from a standalone encoder or a bundle `voice` component. [docs](docs/speaker.md)
 - 🔏 **Speaker fingerprint** (2026-10-04): the speaker registry records which encoder made each voice print and refuses a model mismatch before naming. [docs](docs/diarization.md)
 - 📦 **Bundle GGUF** (2026-10-04): ASR, VAD, diarization, sound events and speaker voice models in one file, with one licence per component; three bundles are published. [docs](docs/bundle.md)
@@ -162,7 +162,7 @@ All models below are published as GGUF in [mudler/parakeet-cpp-gguf](https://hug
 | [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) | Sortformer | n/a | Who spoke when, up to 8 speakers. See [diarization.md](docs/diarization.md) |
 | [parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra) | TDT + VAD head | 0.6B | Moondream, from parakeet-tdt-0.6b-v3. CC-BY-4.0. Not NeMo-validated |
 | [parakeet-redux](https://huggingface.co/moondream/parakeet-redux) | TDT + VAD head | 0.6B | Moondream, ternary encoder. CPU only, offline only. CC-BY-4.0. Not NeMo-validated |
-| [Phonon-2.5](https://huggingface.co/FermionResearch/Phonon-2.5), [Phonon-2.5-English](https://huggingface.co/FermionResearch/Phonon-2.5-English) | TDT | 0.6B | Fermion Research, retrained from parakeet-tdt-0.6b-v3. 25 languages, or English only. The packed file is CPU only and offline only. CC-BY-4.0. Not NeMo-validated, see [phonon.md](docs/phonon.md) |
+| [Phonon-2.5](https://huggingface.co/FermionResearch/Phonon-2.5), [Phonon-2.5-English](https://huggingface.co/FermionResearch/Phonon-2.5-English) | TDT | 0.6B | Fermion Research, retrained from parakeet-tdt-0.6b-v3. 25 languages, or English only. The packed file is offline only; it runs on the CPU kernels, or is expanded to dense weights on a GPU. CC-BY-4.0. Not NeMo-validated, see [phonon.md](docs/phonon.md) |
 | [Silero VAD](https://github.com/snakers4/silero-vad) | VAD | 1.3 MB | MIT. 16 kHz and 8 kHz |
 | [CED](https://huggingface.co/mudler/ced-gguf) | sound events | 6 to 88 MB | 527 classes, from [ced.cpp](https://github.com/localai-org/ced.cpp). See [sound.md](docs/sound.md) |
 

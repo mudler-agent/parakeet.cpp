@@ -93,6 +93,20 @@ void fivevalue_dequant(const uint8_t* codes, const uint8_t* hibits, size_t hibit
                        const uint16_t* lo_f16, const uint16_t* hi_f16, int N, int K,
                        std::vector<float>& W);
 
+// The shape (N rows, K columns) of the encoder linear <base> from the model config; N and K
+// are -1 when the name is none of the 11 linears of a block.
+void fivevalue_linear_shape(const ModelLoader& ml, const std::string& base, int64_t& N, int64_t& K);
+// True for the two pointwise convolutions. A dequantized file (convert with --five-value
+// dequant) stores those as F32 and every other linear as F16 (with --dtype f16).
+bool fivevalue_linear_is_conv(const std::string& base);
+// Dequantizes the five-value linear <base> into the bytes a dequantized file would hold for
+// its <base>.weight: N rows of K values, row-major, F32 when as_f32 else F16. All values are
+// exactly representable in F16, so both are lossless. Used to give a GPU backend dense
+// weights, since the packed kernels are CPU only. Throws std::runtime_error on a missing or
+// malformed set of tensors.
+void fivevalue_linear_dense(const ModelLoader& ml, const std::string& base, bool as_f32,
+                            std::vector<uint8_t>& out);
+
 // True iff the GGUF holds <base>.qweight (a packed ternary linear) or <base>.fvcodes
 // (a five-value linear). ternary_linear handles both.
 bool has_ternary(const ModelLoader& ml, const std::string& base);

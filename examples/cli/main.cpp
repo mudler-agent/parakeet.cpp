@@ -245,6 +245,8 @@ static int cmd_info(int argc, char** argv) {
         const pk::UnifiedCfg& u = c.unified;
         std::printf("  unified         : yes (offline only; buffered streaming not available yet)\n");
         std::printf("  conv_context    : %s (informational)\n", u.conv_context_style.c_str());
+        std::printf("  valid_length    : %s (encoder gets floor(samples/hop) mel frames)\n",
+                    u.valid_length ? "true" : "false");
         std::printf("  presets [L,C,R] : ");
         for (uint32_t i = 0; i < u.num_presets(); ++i)
             std::printf("%s[%d,%d,%d]%s", i ? " " : "", u.presets[3*i], u.presets[3*i+1],

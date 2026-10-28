@@ -37,6 +37,9 @@ struct UnifiedCfg {
     std::string conv_context_style = "regular";  // informational (NeMo DCC is not applied at inference)
     std::vector<int32_t> presets;                // flattened [L,C,R] triples, frames
     uint32_t default_preset = 0;                 // index of the default [L,C,R] triple
+    // true: the offline encoder gets only floor(samples/hop) mel frames, the count
+    // NeMo passes as `length`. Absent (false) for every other GGUF.
+    bool valid_length = false;
     uint32_t num_presets() const { return (uint32_t)(presets.size() / 3); }
 };
 // Prompt-conditioning config (multilingual nemotron). present=false for all

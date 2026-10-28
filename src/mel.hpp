@@ -24,6 +24,9 @@ struct MelKernel {
     int n_fft_, hop_, n_mels_, n_bins_;
     float preemph_, mag_power_, log_guard_;
     bool per_feature_;
+    // Unified checkpoints (GGUF parakeet.unified.valid_length): the encoder gets
+    // only the seq_len = floor(samples/hop) frames that NeMo passes as `length`.
+    bool valid_length_ = false;
     std::vector<float> window_;  // [n_fft] (centered-padded Hann from GGUF)
     std::vector<float> fb_;      // [n_mels, n_bins] row-major (fb_[m*n_bins + b])
 
@@ -36,6 +39,9 @@ struct MelKernel {
     std::vector<float>   fb_nz_val_;   // weight per nonzero entry
     std::vector<int32_t> fb_nz_off_;   // [n_mels+1] prefix offsets into the above
 };
+
+// Keep the first `keep` frames of a row-major [n_mels, T] feature matrix.
+void trim_mel_frames(std::vector<float>& feats, int n_mels, int& T, int keep);
 
 class MelFrontend {
 public:

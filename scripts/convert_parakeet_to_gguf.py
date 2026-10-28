@@ -191,6 +191,9 @@ def write_unified_kvs(w, enc):
     flat = [v for p in UNIFIED_PRESETS for v in p]
     w.add_array("parakeet.unified.presets", flat)
     w.add_uint32("parakeet.unified.default_preset", UNIFIED_DEFAULT_PRESET)
+    # NeMo's encoder gets length = floor(samples / hop) frames, one less than the
+    # mel tensor holds (center padding). The engine trims the mel to match.
+    w.add_bool("parakeet.unified.valid_length", True)
 
 
 # ---------------------------------------------------------------------------

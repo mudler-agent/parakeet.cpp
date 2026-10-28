@@ -358,6 +358,7 @@ bool ModelLoader::parse_config(const KvView& kv){
         u.conv_context_style = kv_str(kv, "parakeet.encoder.conv_context_style", "regular");
         u.presets = kv_i32_arr(kv, "parakeet.unified.presets");
         u.default_preset = kv_u32(kv, "parakeet.unified.default_preset", 0);
+        u.valid_length = kv_bool(kv, "parakeet.unified.valid_length", false);
         if(u.presets.empty() || u.presets.size() % 3 != 0){
             PK_LOG("invalid unified GGUF: parakeet.unified.presets must be a non-empty list of [L,C,R] triples (got %zu values)",
                    u.presets.size());

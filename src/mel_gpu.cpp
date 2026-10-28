@@ -165,6 +165,8 @@ void GpuMel::compute(const std::vector<float>& samples,
             }
         }
     }
+    // Unified checkpoints: NeMo's encoder never sees the frames past seq_len.
+    if (k_.valid_length_ && seq_len < T) trim_mel_frames(feats, n_mels_, T, seq_len);
 }
 
 } // namespace pk

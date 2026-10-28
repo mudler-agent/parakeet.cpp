@@ -25,6 +25,7 @@ MelKernel::MelKernel(const ModelLoader& ml) {
     mag_power_ = c.mag_power;
     log_guard_ = c.log_zero_guard;
     per_feature_ = (c.normalize == "per_feature");
+    valid_length_ = c.unified.present && c.unified.valid_length;
 
     // --- Window: lift the Hann window from the GGUF and center-pad to n_fft. ---
     // NeMo builds torch.hann_window(win_length, periodic=False) and passes it to
@@ -107,6 +108,16 @@ void MelKernel::frame_logmel(const double* frame_in, float* out_col, int out_str
 
 MelFrontend::MelFrontend(const ModelLoader& ml) : k_(ml) {}
 
+void trim_mel_frames(std::vector<float>& feats, int n_mels, int& T, int keep) {
+    if (keep <= 0 || keep >= T) return;
+    std::vector<float> out((size_t)n_mels * keep);
+    for (int m = 0; m < n_mels; ++m)
+        std::copy(feats.begin() + (size_t)m * T, feats.begin() + (size_t)m * T + keep,
+                  out.begin() + (size_t)m * keep);
+    feats.swap(out);
+    T = keep;
+}
+
 void MelFrontend::compute(const std::vector<float>& samples,
                           std::vector<float>& feats, int& n_mels, int& T) const {
     if (samples.empty()) { n_mels = k_.n_mels_; T = 0; feats.clear(); return; }
@@ -188,6 +199,8 @@ void MelFrontend::compute(const std::vector<float>& samples,
             }
         }
     }
+    // Unified checkpoints: NeMo's encoder never sees the frames past seq_len.
+    if (k_.valid_length_ && seq_len < T) trim_mel_frames(feats, n_mels_, T, seq_len);
 }
 
 // ===========================================================================

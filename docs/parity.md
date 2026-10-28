@@ -33,6 +33,12 @@ CPU, batch 1, deterministic greedy (NeMo 2.7.3).
 | `nemotron-3.5-asr-streaming-0.6b` | Streaming, multilingual, prompt-conditioned | `rnnt` | 1024 / 24 | 128 | false | 13087 | RNNT offline + cache-aware streaming, per language | **0.0** | PASS (offline + streaming, langs en/de/es/ja-JP/auto) |
 | `nemotron-labs-unified-asr-0.6b` | Unified offline + buffered streaming, multilingual, prompt-conditioned | `rnnt` | 1024 / 24 | 128 | false | 4095 | RNNT offline (full context); buffered streaming not implemented yet | **0.0** (f32, offline, `en`/`de`/`auto` on two clips) | PARTIAL: offline f32 parity on the production path (`parakeet.unified.valid_length`, encoder 2.4e-7 en, 6.0e-7 de; tokens exact). Offline WER 0 on en and de for f32, f16 and q8_0 against the stored NeMo references; `auto` not measured. The mel max abs diff is 2e-4 (en) and 3e-5 (de), see the note below the table |
 
+Note on sub-hop and empty clips: with `parakeet.unified.valid_length` the mel has
+`floor(samples/hop)` frames, so a clip shorter than one hop has no frames. The
+encoder returns an empty output for zero frames, and the decoders return no text.
+The offline paths and the GPU frontend are covered by `test_unified_offline` (CPU
+backend, f32). The synthetic test checks the frame counts on the CPU and GPU frontends.
+
 Note on the unified mel: the English clip differs by 2e-4 at most, in about 20 of 743 frames, mostly in the highest mel bins where the filterbank power is small. The mean difference is 5e-7. The shared mel code computes in double precision and the NeMo reference in float32, so the reference rounding is the likely cause. This is not unified-only code, and it was not changed. The encoder and token stages match.
 
 Notes:

@@ -109,7 +109,12 @@ void MelKernel::frame_logmel(const double* frame_in, float* out_col, int out_str
 MelFrontend::MelFrontend(const ModelLoader& ml) : k_(ml) {}
 
 void trim_mel_frames(std::vector<float>& feats, int n_mels, int& T, int keep) {
-    if (keep <= 0 || keep >= T) return;
+    if (keep >= T) return;
+    if (keep <= 0) {  // a clip shorter than one hop: NeMo's length is 0
+        feats.clear();
+        T = 0;
+        return;
+    }
     std::vector<float> out((size_t)n_mels * keep);
     for (int m = 0; m < n_mels; ++m)
         std::copy(feats.begin() + (size_t)m * T, feats.begin() + (size_t)m * T + keep,

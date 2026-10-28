@@ -349,6 +349,31 @@ bool ModelLoader::parse_config(const KvView& kv){
     // enable streaming.present: the C-API and the CLI refuse them for stream_*.
     if(cfg_.att_context_style == "chunked_limited_with_rc"){
         UnifiedCfg& u = cfg_.unified;
+        // gguf_get_val_* aborts on a type mismatch, so check each key's type first
+        // and return a load error instead.
+        const struct { const char* key; enum gguf_type type; } expect[] = {
+            {"parakeet.unified.present", GGUF_TYPE_BOOL},
+            {"parakeet.unified.valid_length", GGUF_TYPE_BOOL},
+            {"parakeet.unified.default_preset", GGUF_TYPE_UINT32},
+            {"parakeet.unified.presets", GGUF_TYPE_ARRAY},
+            {"parakeet.encoder.conv_context_style", GGUF_TYPE_STRING},
+        };
+        for(const auto& e : expect){
+            const int64_t id = kv.find(e.key);
+            if(id >= 0 && gguf_get_kv_type(kv.g, id) != e.type){
+                PK_LOG("invalid unified GGUF: %s has the wrong type", e.key);
+                return false;
+            }
+        }
+        // kv_i32_arr reads the element type, so the array's element type is
+        // checked above only when the key is an array. Check the element type here too.
+        {
+            const int64_t id = kv.find("parakeet.unified.presets");
+            if(id >= 0 && gguf_get_arr_type(kv.g, id) != GGUF_TYPE_INT32){
+                PK_LOG("invalid unified GGUF: parakeet.unified.presets must hold INT32 values");
+                return false;
+            }
+        }
         u.present = kv_bool(kv, "parakeet.unified.present", false);
         if(!u.present){
             PK_LOG("invalid unified GGUF: att_context_style is chunked_limited_with_rc but "

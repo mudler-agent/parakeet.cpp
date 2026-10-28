@@ -62,6 +62,16 @@ void Encoder::forward_capture(const std::vector<float>& mel, int n_mels, int T,
     // ConformerLayer::build_graph) are reused verbatim by the unit tests.
     layer_outs.assign(capture_layers.size(), {});
 
+    // No frames (an empty clip, or a clip shorter than one hop with
+    // parakeet.unified.valid_length): nothing to encode. Return an empty output,
+    // and the decoders emit no tokens.
+    if (T <= 0) {
+        d_model = d_model_;
+        Tout = 0;
+        enc_out.clear();
+        return;
+    }
+
     // Pos_emb is computed host-side once T' is known (deterministic from T, but
     // we read it from the subsampling builder). Storage lives in the pool so it
     // outlives Backend::compute. capture_layers map: layer idx -> output slot.

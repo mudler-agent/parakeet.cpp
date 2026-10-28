@@ -132,6 +132,12 @@ int main() {
         CHECK(got_ids == ref_ids);
         std::fprintf(stderr, "[text] got=%s\n[text] ref=%s\n", tr.text.c_str(), ref_text.c_str());
         CHECK(tr.text == ref_text);
+
+        // Sub-hop and empty clips have zero mel frames (valid_length trims to
+        // floor(S/hop)): no text and no crash, with and without timestamps.
+        CHECK(m->transcribe_16k(std::vector<float>(100, 0.1f), pk::Decoder::kDefault, lang).empty());
+        CHECK(m->transcribe_16k(std::vector<float>(), pk::Decoder::kDefault, lang).empty());
+        CHECK(m->transcribe_with_timestamps(std::vector<float>(), 16000, pk::Decoder::kDefault, lang).text.empty());
     }
 
     // ---- stage 5: stream_* must refuse the unified model, with a reason ----

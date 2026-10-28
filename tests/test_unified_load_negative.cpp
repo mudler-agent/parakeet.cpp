@@ -1,7 +1,8 @@
 // A unified GGUF (att_context_style chunked_limited_with_rc) whose preset block
 // is malformed must be refused by the loader with a message, not run. Doctored
-// copies are derived from $PARAKEET_TEST_GGUF_UNIFIED with the gguf C API and
-// written to the system temp directory. Skips (77) when the env var is unset.
+// copies keep the source's key-value section, without tensors (ModelLoader::load
+// only parses the config), and are written next to the source file. Skips (77)
+// when the env var is unset.
 #include "model_loader.hpp"
 
 #include <unistd.h>
@@ -21,35 +22,28 @@ using namespace pk;
 static int failures = 0;
 #define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL: %s (line %d)\n", #c, __LINE__); ++failures; } } while (0)
 
-// Removes the file on every exit path.
+// Removes the file on every exit path. The file sits next to the source GGUF.
 struct TempFile {
     std::string path;
-    explicit TempFile(const std::string& tag) {
-        path = (std::filesystem::temp_directory_path() /
+    TempFile(const std::string& src, const std::string& tag) {
+        path = (std::filesystem::path(src).parent_path() /
                 ("pk_unified_neg_" + std::to_string((long)getpid()) + "_" + tag + ".gguf")).string();
     }
     ~TempFile() { std::remove(path.c_str()); }
 };
 
-// Rebuilds src through gguf_init_empty (the writer cannot reuse the loaded
-// context's tensor infos), then applies edit and writes to tf.path.
+// Writes a KV-only copy of src (no tensors), then applies edit to it.
 static bool doctor(const char* src, const TempFile& tf,
                    const std::function<void(gguf_context*)>& edit) {
-    ggml_context* ctx = nullptr;
-    gguf_init_params p{/*no_alloc*/ false, &ctx};
+    gguf_init_params p{/*no_alloc*/ true, nullptr};
     gguf_context* g = gguf_init_from_file(src, p);
     if (!g) return false;
     gguf_context* w = gguf_init_empty();
     gguf_set_kv(w, g);
-    const int64_t n = gguf_get_n_tensors(g);
-    for (int64_t i = 0; i < n; ++i) {
-        gguf_add_tensor(w, ggml_get_tensor(ctx, gguf_get_tensor_name(g, i)));
-    }
     edit(w);
-    const bool ok = gguf_write_to_file(w, tf.path.c_str(), false);
+    const bool ok = gguf_write_to_file(w, tf.path.c_str(), /*only_meta*/ true);
     gguf_free(w);
     gguf_free(g);
-    ggml_free(ctx);
     return ok;
 }
 
@@ -60,7 +54,7 @@ static void drop_key(gguf_context* w, const char* key) {
 
 static void expect_refused(const char* src, const std::string& tag,
                            const std::function<void(gguf_context*)>& edit) {
-    TempFile tf(tag);
+    TempFile tf(src, tag);
     CHECK(doctor(src, tf, edit));
     ModelLoader ml;
     const bool loaded = ml.load(tf.path);
@@ -76,7 +70,7 @@ int main() {
     }
     {
         // Control: an unedited copy through the same rebuild path must load.
-        TempFile tf("control");
+        TempFile tf(src, "control");
         CHECK(doctor(src, tf, [](gguf_context*) {}));
         ModelLoader ml;
         CHECK(ml.load(tf.path));

@@ -31,6 +31,7 @@ CPU, batch 1, deterministic greedy (NeMo 2.7.3).
 | `parakeet-rnnt-1.1b` | RNNT | `rnnt` | 1024 / 42 | 80 | **true** | 1024 | RNNT | **0.0** | PASS |
 | `parakeet_realtime_eou_120m-v1` | Streaming + EOU | `rnnt` | 512 / 17 | 128 | false | 1026 | RNNT (offline, limited-context) | **0.0** | PASS (Phase 5 — 5a milestone) |
 | `nemotron-3.5-asr-streaming-0.6b` | Streaming, multilingual, prompt-conditioned | `rnnt` | 1024 / 24 | 128 | false | 13087 | RNNT offline + cache-aware streaming, per language | **0.0** | PASS (offline + streaming, langs en/de/es/ja-JP/auto) |
+| `nemotron-labs-unified-asr-0.6b` | Unified offline + buffered streaming, multilingual, prompt-conditioned | `rnnt` | 1024 / 24 | 128 | false | 4095 | RNNT offline (full context); buffered streaming not implemented yet | **0.0** (f32, offline, `en`/`de`/`auto` on two clips) | PARTIAL: offline WER 0 at f32. Open: the encoder gets all mel frames, NeMo gets `floor(samples/hop)` (one fewer); on a 18 s German clip this gives 0.028 max abs in `encoder_out` (6.9e-7 with NeMo's length). Tokens still match |
 
 Notes:
 - `xscaling` = NeMo FastConformer `xscale=sqrt(d_model)` (true) vs `xscale=None` (false).

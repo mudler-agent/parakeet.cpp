@@ -1,0 +1,116 @@
+// A unified GGUF (att_context_style chunked_limited_with_rc) whose preset block
+// is malformed must be refused by the loader with a message, not run. Doctored
+// copies are derived from $PARAKEET_TEST_GGUF_UNIFIED with the gguf C API and
+// written to the system temp directory. Skips (77) when the env var is unset.
+#include "model_loader.hpp"
+
+#include <unistd.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <functional>
+#include <string>
+
+#include "ggml.h"
+#include "gguf.h"
+
+using namespace pk;
+
+static int failures = 0;
+#define CHECK(c) do { if (!(c)) { std::fprintf(stderr, "FAIL: %s (line %d)\n", #c, __LINE__); ++failures; } } while (0)
+
+// Removes the file on every exit path.
+struct TempFile {
+    std::string path;
+    explicit TempFile(const std::string& tag) {
+        path = (std::filesystem::temp_directory_path() /
+                ("pk_unified_neg_" + std::to_string((long)getpid()) + "_" + tag + ".gguf")).string();
+    }
+    ~TempFile() { std::remove(path.c_str()); }
+};
+
+// Rebuilds src through gguf_init_empty (the writer cannot reuse the loaded
+// context's tensor infos), then applies edit and writes to tf.path.
+static bool doctor(const char* src, const TempFile& tf,
+                   const std::function<void(gguf_context*)>& edit) {
+    ggml_context* ctx = nullptr;
+    gguf_init_params p{/*no_alloc*/ false, &ctx};
+    gguf_context* g = gguf_init_from_file(src, p);
+    if (!g) return false;
+    gguf_context* w = gguf_init_empty();
+    gguf_set_kv(w, g);
+    const int64_t n = gguf_get_n_tensors(g);
+    for (int64_t i = 0; i < n; ++i) {
+        gguf_add_tensor(w, ggml_get_tensor(ctx, gguf_get_tensor_name(g, i)));
+    }
+    edit(w);
+    const bool ok = gguf_write_to_file(w, tf.path.c_str(), false);
+    gguf_free(w);
+    gguf_free(g);
+    ggml_free(ctx);
+    return ok;
+}
+
+// Replaces a key: gguf_set_val_* does not overwrite a copied key, so remove it first.
+static void drop_key(gguf_context* w, const char* key) {
+    gguf_remove_key(w, key);
+}
+
+static void expect_refused(const char* src, const std::string& tag,
+                           const std::function<void(gguf_context*)>& edit) {
+    TempFile tf(tag);
+    CHECK(doctor(src, tf, edit));
+    ModelLoader ml;
+    const bool loaded = ml.load(tf.path);
+    std::printf("%s: %s\n", tag.c_str(), loaded ? "LOADED (unexpected)" : "refused");
+    CHECK(!loaded);
+}
+
+int main() {
+    const char* src = std::getenv("PARAKEET_TEST_GGUF_UNIFIED");
+    if (!src) {
+        std::puts("skip: PARAKEET_TEST_GGUF_UNIFIED unset");
+        return 77;
+    }
+    {
+        // Control: an unedited copy through the same rebuild path must load.
+        TempFile tf("control");
+        CHECK(doctor(src, tf, [](gguf_context*) {}));
+        ModelLoader ml;
+        CHECK(ml.load(tf.path));
+        CHECK(ml.config().unified.present);
+        CHECK(!ml.config().streaming.present);
+    }
+    {
+        // A triple is missing a value: presets must be [L,C,R] triples.
+        const int32_t bad[4] = {70, 7, 7, 70};
+        expect_refused(src, "presets_not_triples", [&](gguf_context* w) {
+            drop_key(w, "parakeet.unified.presets");
+            gguf_set_arr_data(w, "parakeet.unified.presets", GGUF_TYPE_INT32, bad, 4);
+        });
+    }
+    {
+        // Chunk 0 is not a valid streaming window.
+        const int32_t bad[3] = {70, 0, 7};
+        expect_refused(src, "chunk_zero", [&](gguf_context* w) {
+            drop_key(w, "parakeet.unified.presets");
+            gguf_set_arr_data(w, "parakeet.unified.presets", GGUF_TYPE_INT32, bad, 3);
+        });
+    }
+    expect_refused(src, "default_preset_out_of_range", [](gguf_context* w) {
+        drop_key(w, "parakeet.unified.default_preset");
+        gguf_set_val_u32(w, "parakeet.unified.default_preset", 99);
+    });
+    expect_refused(src, "unified_flag_unset", [](gguf_context* w) {
+        drop_key(w, "parakeet.unified.present");
+        gguf_set_val_bool(w, "parakeet.unified.present", false);
+    });
+    expect_refused(src, "presets_missing", [](gguf_context* w) {
+        drop_key(w, "parakeet.unified.presets");
+    });
+    if (failures) { std::fprintf(stderr, "test_unified_load_negative: %d failure(s)\n", failures); return 1; }
+    std::puts("test_unified_load_negative: OK");
+    return 0;
+}

@@ -181,6 +181,10 @@ def _prompt_streaming_text(m, feats, feat_len, pidx, num_prompts, specials):
     enc = m.encoder
     if not hasattr(enc, "cache_aware_stream_step"):
         return None, None
+    # Unified checkpoints (chunked_limited_with_rc) have the method too, but they
+    # are not cache-aware: their streaming is buffered, not a cache-aware pass.
+    if getattr(enc, "att_context_style", None) == "chunked_limited_with_rc":
+        return None, None
     from nemo.collections.asr.parts.utils.streaming_utils import (
         CacheAwareStreamingAudioBuffer,
     )
@@ -347,6 +351,7 @@ def compute_prompt_reference(m, audio_path, lang=None):
         "target_lang": target_lang,
         "prompt_index": pidx,
         "num_prompts": num_prompts,
+        "mel": _squeeze(feats.cpu().float().numpy()),                # [n_mels, T]
         "encoder_out": _squeeze(enc.cpu().float().numpy()),          # [D, T]
         "prompt_kernel_out": _squeeze(pk_out.cpu().float().numpy()),  # [T, D]
         "rnnt_ids": rnnt_ids,
@@ -385,6 +390,7 @@ def dump_prompt_baseline(m, args):
     w.add_string("baseline.target_lang", target_lang)
     w.add_uint32("baseline.prompt_index", pidx)
     w.add_uint32("baseline.num_prompts", num_prompts)
+    w.add_tensor("mel", ref["mel"])                           # [n_mels, T]
     w.add_tensor("encoder_out", ref["encoder_out"])           # [D, T]
     w.add_tensor("prompt_kernel_out", ref["prompt_kernel_out"])  # [T, D]
     w.add_uint32("baseline.rnnt_token_count", int(rnnt_ids.shape[0]))

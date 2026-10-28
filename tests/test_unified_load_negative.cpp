@@ -93,6 +93,16 @@ int main() {
             gguf_set_arr_data(w, "parakeet.unified.presets", GGUF_TYPE_INT32, bad, 3);
         });
     }
+    {
+        // The valid-length gate defaults off: without the key the file loads and the
+        // mel is not trimmed. Only the converter's unified checkpoints set it.
+        TempFile tf(src, "no_valid_length");
+        CHECK(doctor(src, tf, [](gguf_context* w) { drop_key(w, "parakeet.unified.valid_length"); }));
+        ModelLoader ml;
+        CHECK(ml.load(tf.path));
+        CHECK(ml.config().unified.present);
+        CHECK(!ml.config().unified.valid_length);
+    }
     expect_refused(src, "default_preset_out_of_range", [](gguf_context* w) {
         drop_key(w, "parakeet.unified.default_preset");
         gguf_set_val_u32(w, "parakeet.unified.default_preset", 99);

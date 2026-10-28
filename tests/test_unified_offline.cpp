@@ -71,38 +71,37 @@ int main() {
         CHECK(c.prompt.present);
         CHECK(c.use_bias);  // this checkpoint keeps the linear biases (nemotron-3.5 does not)
 
-        // ---- stage 1: mel (per-feature normalized, full clip) ----
+        // ---- stage 1: mel from the production frontend (per-feature normalized) ----
+        // With parakeet.unified.valid_length the frontend trims to NeMo's `length`
+        // (floor(samples/hop)); the reference mel holds one more frame, so only the
+        // first T frames are compared.
         std::vector<float> ref_mel; std::vector<int64_t> mshape;
         if (!pktest::load_baseline(base, "mel", ref_mel, mshape)) return 1;
+        const int Tref = (int)mshape[1];
         pk::MelFrontend mel(ml);
         std::vector<float> feats; int n_mels = 0, T = 0;
         mel.compute(a.samples, feats, n_mels, T);
-        CHECK(mshape.size() == 2 && (int)mshape[0] == n_mels && (int)mshape[1] == T);
-        const float mel_diff = max_abs_diff(feats, ref_mel);
-        std::fprintf(stderr, "[mel] max|diff| = %.3g\n", (double)mel_diff);
+        CHECK(c.unified.valid_length);
+        CHECK(T == (int)(a.samples.size() / (size_t)c.hop_length));
+        CHECK(T <= Tref && (int)mshape[0] == n_mels);
+        std::vector<float> ref_head((size_t)n_mels * T);
+        for (int m = 0; m < n_mels; ++m)
+            for (int t = 0; t < T; ++t) ref_head[(size_t)m * T + t] = ref_mel[(size_t)m * Tref + t];
+        const float mel_diff = max_abs_diff(feats, ref_head);
+        std::fprintf(stderr, "[mel] frames=%d (reference holds %d) max|diff| = %.3g\n", T, Tref, (double)mel_diff);
         CHECK(mel_diff < 1e-2f);  // same tolerance as test_mel
 
-        // ---- stage 2: encoder on the baseline mel (full attention, pad mask) ----
-        // NeMo encodes with length = floor(samples / hop) valid frames, one less than
-        // the 1 + samples/hop frames the mel tensor holds (center padding). The
-        // reference encoder_out was computed with that valid length, so this stage
-        // feeds the same frames. The production Model path feeds all T frames; see
-        // the open issue in docs/parity.md (its effect is 0.028 max abs on the German clip).
+        // ---- stage 2: encoder on the production mel (full attention, pad mask) ----
         pk::ensure_weights_realized(ml);
         std::vector<float> ref_enc; std::vector<int64_t> eshape;
         if (!pktest::load_baseline(base, "encoder_out", ref_enc, eshape)) return 1;
-        const int T_valid = (int)(a.samples.size() / (size_t)c.hop_length);
-        std::vector<float> valid_mel((size_t)n_mels * T_valid);
-        for (int m = 0; m < n_mels; ++m)
-            for (int t = 0; t < T_valid; ++t) valid_mel[(size_t)m * T_valid + t] = ref_mel[(size_t)m * T + t];
         pk::Encoder enc(ml);
         std::vector<float> enc_out; int dm = 0, Tout = 0;
-        enc.forward(valid_mel, n_mels, T_valid, enc_out, dm, Tout);
+        enc.forward(feats, n_mels, T, enc_out, dm, Tout);
         CHECK(eshape.size() == 2 && (int)eshape[0] == dm && (int)eshape[1] == Tout);
         const float enc_diff = max_abs_diff(enc_out, ref_enc);
-        std::fprintf(stderr, "[encoder] valid frames=%d of %d, max|diff| = %.3g (D=%d T=%d)\n",
-                     T_valid, T, (double)enc_diff, dm, Tout);
-        CHECK(enc_diff < 1e-4f);
+        std::fprintf(stderr, "[encoder] max|diff| = %.3g (D=%d T=%d)\n", (double)enc_diff, dm, Tout);
+        CHECK(enc_diff < 1e-5f);
 
         // ---- stage 3: prompt kernel with the session language ----
         const int prompt_index = (int)pktest::pktest_read_u32(base, "baseline.prompt_index");

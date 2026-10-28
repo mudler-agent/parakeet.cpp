@@ -45,7 +45,7 @@ and `use_bias=true`. nemotron stores `att_context_size` as a **list of presets**
 than a single `[left,right]`, so the converter records all of them in
 `att_context_presets` and uses the first pair for the scalar left/right keys.
 
-The `parakeet.unified.*` keys are emitted **only for unified checkpoints**
+The `parakeet.unified.*` keys (written by `scripts/unified_kvs.py`, which `tests/python/check_unified_kvs.py` checks without NeMo) are emitted **only for unified checkpoints**
 (`att_context_style == "chunked_limited_with_rc"`, e.g.
 `nvidia/nemotron-labs-unified-asr-0.6b`). Offline inference is full context, so
 these keys only describe the buffered-streaming presets for a later stage. The

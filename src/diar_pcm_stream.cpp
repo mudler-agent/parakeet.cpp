@@ -10,6 +10,10 @@ DiarPcmStream::DiarPcmStream(const DiarizationModel& m, DiarLatency latency)
     : hop_length_((int)m.config().hop_length) {
     const ModelLoader& ml = m.loader();
     sd_  = std::make_unique<StreamingDiarization>(ml, diar_stream_config(latency, ml.config()));
+    // The streaming mel is frame-local, so it needs normalize "NA". The shipped
+    // diarization checkpoint (nvidia/Nemotron-3-Diarization) has normalize NA in
+    // its model_config.yaml. A per_feature diarization GGUF is refused here with
+    // a clean error (StreamingMel throws), not run with the wrong features.
     mel_ = std::make_unique<StreamingMel>(ml);
 }
 

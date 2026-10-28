@@ -872,16 +872,16 @@ extern "C" parakeet_vad_stream* parakeet_capi_vad_stream_begin(parakeet_ctx* vad
         if (req.mode != pk::VadRequest::Mode::kSpeech) { vad->last_error = "VAD streams support mode \"speech\" only"; return nullptr; }
         if (req.opts.run_gate > 0.0f) { vad->last_error = "VAD option run_gate is offline only: a stream has no run median"; return nullptr; }
         req.opts.frame_sec = pk::kSileroFrameSec;
-        auto* s = new (std::nothrow) parakeet_vad_stream();
+        std::unique_ptr<parakeet_vad_stream> s(new (std::nothrow) parakeet_vad_stream());
         if (!s) { vad->last_error = "out of memory"; return nullptr; }
         s->ctx = vad;
         s->stream = vad->silero->new_stream(sample_rate);
         s->tracker.reset(new pk::VadEventTracker(req.opts));
         s->sample_rate = sample_rate;
         s->probabilities = req.probabilities;
-        if (!s->stream.valid()) { delete s; vad->last_error = "failed to create the Silero stream"; return nullptr; }
+        if (!s->stream.valid()) { vad->last_error = "failed to create the Silero stream"; return nullptr; }
         vad->last_error.clear();
-        return s;
+        return s.release();
     } catch (const std::exception& e) {
         vad->last_error = e.what();
         return nullptr;
@@ -1195,14 +1195,16 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
     // NULL / "" -> model default language (ignored by non-prompt models).
     const std::string lang = target_lang ? target_lang : "";
     try {
-        auto* s = new (std::nothrow) parakeet_stream();
+        // Held by unique_ptr until every member is built: a throw in the
+        // constructors below must not leak the stream.
+        std::unique_ptr<parakeet_stream> s(new (std::nothrow) parakeet_stream());
         if (!s) { ctx->last_error = "out of memory"; return nullptr; }
         s->ctx = ctx;
         s->sess = std::make_unique<pk::StreamingSession>(ctx->model->loader(), lang);
         s->mel  = std::make_unique<pk::StreamingMel>(ctx->model->loader());
         s->n_mels = s->mel->n_mels();
         ctx->last_error.clear();
-        return s;
+        return s.release();
     } catch (const std::exception& e) {
         ctx->last_error = e.what();
         return nullptr;

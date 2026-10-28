@@ -46,6 +46,12 @@ checks.
 
 ## Live streaming and latency modes
 
+The streaming mel is frame-local and does not normalize per feature, so the live
+API needs a diarization GGUF with `parakeet.preprocessor.normalize` set to `NA`.
+The shipped checkpoint (`nvidia/Nemotron-3-Diarization`) has `normalize: NA` in its
+`model_config.yaml`. A GGUF that says `per_feature` is refused by
+`parakeet_capi_diarize_stream_begin*` with an error, not run with the wrong features.
+
 The live streaming API (`parakeet_capi_diarize_stream_*`) takes 16 kHz PCM in
 pieces of any size and computes the log-mel incrementally (bit-identical to
 the whole-clip mel). Segments that continue past a chunk boundary are not

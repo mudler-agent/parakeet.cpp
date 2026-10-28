@@ -345,7 +345,38 @@ bool ModelLoader::parse_config(const KvView& kv){
             return false;
         }
     }
-    if(cfg_.att_context_style != "regular"){
+    // Unified checkpoints (chunked_limited_with_rc) read their own block and never
+    // enable streaming.present: the C-API and the CLI refuse them for stream_*.
+    if(cfg_.att_context_style == "chunked_limited_with_rc"){
+        UnifiedCfg& u = cfg_.unified;
+        u.present = kv_bool(kv, "parakeet.unified.present", false);
+        if(!u.present){
+            PK_LOG("invalid unified GGUF: att_context_style is chunked_limited_with_rc but "
+                   "parakeet.unified.present is not set");
+            return false;
+        }
+        u.conv_context_style = kv_str(kv, "parakeet.encoder.conv_context_style", "regular");
+        u.presets = kv_i32_arr(kv, "parakeet.unified.presets");
+        u.default_preset = kv_u32(kv, "parakeet.unified.default_preset", 0);
+        if(u.presets.empty() || u.presets.size() % 3 != 0){
+            PK_LOG("invalid unified GGUF: parakeet.unified.presets must be a non-empty list of [L,C,R] triples (got %zu values)",
+                   u.presets.size());
+            return false;
+        }
+        for(uint32_t i = 0; i < u.num_presets(); ++i){
+            const int32_t L = u.presets[3*i], C = u.presets[3*i+1], R = u.presets[3*i+2];
+            if(L < 0 || C < 1 || R < 0){
+                PK_LOG("invalid unified GGUF: preset %u is [%d,%d,%d] (need L >= 0, C >= 1, R >= 0)",
+                       (unsigned)i, (int)L, (int)C, (int)R);
+                return false;
+            }
+        }
+        if(u.default_preset >= u.num_presets()){
+            PK_LOG("invalid unified GGUF: default preset %u is out of range (%u presets)",
+                   (unsigned)u.default_preset, (unsigned)u.num_presets());
+            return false;
+        }
+    } else if(cfg_.att_context_style != "regular"){
         StreamingCfg& s = cfg_.streaming;
         s.chunk_size = kv_i32_arr(kv, "parakeet.streaming.chunk_size");
         s.shift_size = kv_i32_arr(kv, "parakeet.streaming.shift_size");

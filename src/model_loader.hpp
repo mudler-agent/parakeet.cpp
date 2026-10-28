@@ -27,6 +27,18 @@ struct StreamingCfg {
     int32_t drop_extra_pre_encoded=0;
     bool present=false;                           // true only for streaming models
 };
+// Unified checkpoints (NeMo att_context_style == "chunked_limited_with_rc"), e.g.
+// nvidia/nemotron-labs-unified-asr-0.6b. Offline attention is full context, so
+// offline needs nothing from this block. The presets are the buffered-streaming
+// windows (80 ms encoder frames) for a later streaming stage. streaming.present
+// stays false for these models, so the stream_* C-API refuses them.
+struct UnifiedCfg {
+    bool present = false;
+    std::string conv_context_style = "regular";  // informational (NeMo DCC is not applied at inference)
+    std::vector<int32_t> presets;                // flattened [L,C,R] triples, frames
+    uint32_t default_preset = 0;                 // index of the default [L,C,R] triple
+    uint32_t num_presets() const { return (uint32_t)(presets.size() / 3); }
+};
 // Prompt-conditioning config (multilingual nemotron). present=false for all
 // existing models, which then skip the prompt stage entirely.
 struct PromptCfg {
@@ -80,6 +92,7 @@ struct ParakeetConfig {
     bool conv_causal=false;                             // causal depthwise conv pad
     bool use_bias=true;     // false for nemotron (encoder linears have no bias)
     StreamingCfg streaming;
+    UnifiedCfg unified;     // present=false unless att_context_style is chunked_limited_with_rc
     PromptCfg prompt;       // prompt conditioning (present=false for non-prompt)
     TernaryCfg ternary;     // present=false unless parakeet.ternary.present
     FiveValueCfg fivevalue; // present=false unless parakeet.fivevalue.present

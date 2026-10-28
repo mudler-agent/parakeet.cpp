@@ -1182,6 +1182,12 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
             : no_model_msg(ctx);
         return nullptr;
     }
+    if (ctx->model->config().unified.present) {
+        // Unified checkpoints run offline only until the buffered streaming driver lands.
+        ctx->last_error = "unified (chunked_limited_with_rc) model: buffered streaming is not "
+                          "available yet; use offline transcription";
+        return nullptr;
+    }
     if (!ctx->model->config().streaming.present) {
         ctx->last_error = "model is not a cache-aware streaming model";
         return nullptr;

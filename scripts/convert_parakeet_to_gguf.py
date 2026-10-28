@@ -163,6 +163,36 @@ def prompt_config(cfg):
     return True, num, keys, vals, default_lang
 
 
+# Unified checkpoints (nvidia/nemotron-labs-unified-asr-0.6b) use NeMo's
+# chunked_limited_with_rc attention. Offline inference is full context, so the
+# offline engine needs no new compute. The KVs below only describe the
+# buffered-streaming presets for a later stage.
+UNIFIED_ATT_STYLE = "chunked_limited_with_rc"
+# [L, C, R] in 80 ms encoder frames, from the model card's presets, converted
+# with NeMo's int(seconds * 100 / 8) truncation (5.6 s -> 70, 1.04 s -> 13).
+UNIFIED_PRESETS = [(70, 13, 13), (70, 7, 7), (70, 2, 5), (70, 1, 3), (70, 1, 2), (70, 1, 1)]
+UNIFIED_DEFAULT_PRESET = 1  # (70, 7, 7), the card's example command
+
+
+def write_unified_kvs(w, enc):
+    """Write the unified-checkpoint KVs. Only called for att_context_style
+    chunked_limited_with_rc. It writes no parakeet.streaming.* and no causal
+    keys, so the loader keeps streaming.present false for these models."""
+    w.add_bool("parakeet.unified.present", True)
+    # The loader reads this key to pick the unified block over the streaming one.
+    w.add_string("parakeet.encoder.att_context_style", UNIFIED_ATT_STYLE)
+    w.add_string("parakeet.encoder.conv_context_style",
+                 str(_get(enc, "conv_context_style", "regular")))
+    # Training window sets (informational): att_chunk_context_size = [left, chunk, right].
+    train = _get(enc, "att_chunk_context_size", None)
+    if train is not None and len(train) == 3:
+        for name, part in zip(("train_left", "train_chunk", "train_right"), train):
+            w.add_array(f"parakeet.unified.{name}", [int(x) for x in part])
+    flat = [v for p in UNIFIED_PRESETS for v in p]
+    w.add_array("parakeet.unified.presets", flat)
+    w.add_uint32("parakeet.unified.default_preset", UNIFIED_DEFAULT_PRESET)
+
+
 # ---------------------------------------------------------------------------
 # Quantization policy.
 #
@@ -477,7 +507,11 @@ def main():
     # supplies offline-safe defaults (style "regular", causal flags false,
     # streaming block absent) when these keys are missing.
     att_style = str(_get(enc, "att_context_style", "regular"))
-    is_streaming = att_style != "regular"
+    if att_style == UNIFIED_ATT_STYLE:
+        write_unified_kvs(w, enc)
+    # Unified checkpoints take their own block above and never reach the
+    # cache-aware streaming block below.
+    is_streaming = att_style not in ("regular", UNIFIED_ATT_STYLE)
     if is_streaming:
         # att_context_size = [left, right]; streaming models use finite values
         # (e.g. [70, 1]) while offline models use [-1, -1]. Stored as signed

@@ -241,6 +241,16 @@ static int cmd_info(int argc, char** argv) {
     std::printf("  causal ds/conv  : %s / %s\n",
                 c.causal_downsampling ? "true" : "false",
                 c.conv_causal ? "true" : "false");
+    if (c.unified.present) {
+        const pk::UnifiedCfg& u = c.unified;
+        std::printf("  unified         : yes (offline only; buffered streaming not available yet)\n");
+        std::printf("  conv_context    : %s (informational)\n", u.conv_context_style.c_str());
+        std::printf("  presets [L,C,R] : ");
+        for (uint32_t i = 0; i < u.num_presets(); ++i)
+            std::printf("%s[%d,%d,%d]%s", i ? " " : "", u.presets[3*i], u.presets[3*i+1],
+                        u.presets[3*i+2], i == u.default_preset ? "*" : "");
+        std::printf("\n  (* = default preset)\n");
+    }
     if (c.streaming.present) {
         const pk::StreamingCfg& s = c.streaming;
         auto print_ivec = [](const char* label, const std::vector<int32_t>& v) {
@@ -306,6 +316,12 @@ static int cmd_transcribe_stream(const std::string& model, const std::string& in
     pk::ModelLoader ml;
     if (!ml.load(model)) {
         std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
+        return 1;
+    }
+    if (ml.config().unified.present) {
+        std::fprintf(stderr,
+            "parakeet-cli: --stream is not available for unified models yet; "
+            "%s supports offline transcription only\n", model.c_str());
         return 1;
     }
     if (!ml.config().streaming.present) {

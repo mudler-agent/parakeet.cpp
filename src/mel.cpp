@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
 #include <vector>
 
 namespace pk {
@@ -198,9 +199,11 @@ StreamingMel::StreamingMel(const ModelLoader& ml) : k_(ml), pad_(k_.n_fft_ / 2) 
     // there is no whole-utterance normalization. The only streaming model
     // (nvidia/parakeet_realtime_eou_120m-v1) uses normalize="NA"; per_feature
     // would need cross-frame stats and must use MelFrontend::compute instead.
-    assert(!k_.per_feature_ &&
-           "StreamingMel is frame-local; per_feature needs whole-utterance "
-           "stats — use MelFrontend::compute for per_feature models");
+    // A real check, not an assert: Release builds compile asserts out, and a
+    // per_feature model would silently produce wrong features here.
+    if (k_.per_feature_)
+        throw std::runtime_error("StreamingMel is frame-local; per_feature needs whole-utterance "
+                                 "stats: use MelFrontend::compute for per_feature models");
     reset();
 }
 

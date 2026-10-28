@@ -42,7 +42,10 @@ StreamingEncoder::StreamingEncoder(const ModelLoader& ml) : ml_(ml) {
     assert(n_heads_ > 0 && d_model_ % n_heads_ == 0);
     d_head_ = d_model_ / n_heads_;
     left_pad_ = conv_kernel_ - 1;   // causal depthwise conv left-context (8)
-    assert(c.streaming.present && "StreamingEncoder requires a streaming model");
+    // Real checks, not asserts: CMake builds Release (NDEBUG) by default, and a
+    // misrouted model must fail with a catchable error, not run on garbage.
+    if (!c.streaming.present)
+        throw std::runtime_error("StreamingEncoder requires a cache-aware streaming model (parakeet.streaming.*)");
     const StreamingCfg& s = c.streaming;
     // chunk_size/shift_size/pre_encode_cache_size are stored as the [a,b] arrays;
     // the cache-aware streaming buffer uses the [0] value for the FIRST chunk and
@@ -58,9 +61,12 @@ StreamingEncoder::StreamingEncoder(const ModelLoader& ml) : ml_(ml) {
     valid_out_len_     = s.valid_out_len;
     att_left_  = c.att_context_left;
     att_right_ = c.att_context_right;
-    assert(c.causal_downsampling && "streaming model expects causal subsampling");
-    assert(c.conv_causal && "streaming model expects causal depthwise conv");
-    assert(c.att_context_style == "chunked_limited");
+    if (!c.causal_downsampling)
+        throw std::runtime_error("StreamingEncoder expects causal subsampling (streaming model)");
+    if (!c.conv_causal)
+        throw std::runtime_error("StreamingEncoder expects a causal depthwise conv (streaming model)");
+    if (c.att_context_style != "chunked_limited")
+        throw std::runtime_error("StreamingEncoder expects att_context_style chunked_limited, got " + c.att_context_style);
     reset();
 }
 

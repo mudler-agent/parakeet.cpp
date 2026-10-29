@@ -53,4 +53,24 @@ parakeet_capi_stream_free(s);
 
 `<EOU>` (end-of-utterance) and `<EOB>` (backchannel) are stripped from the text and surfaced via `*eou_out` (the CLI `--stream` prints them as `[EOU @ <t>s]` markers). The streaming transcript matches NeMo's cache-aware streaming exactly, and `finalize` flushes the end-of-stream tail without fabricating an `<EOU>` that NeMo would not emit.
 
+## Buffered streaming (unified checkpoints, ABI v11)
+
+A unified checkpoint (`nvidia/nemotron-labs-unified-asr-0.6b`) streams by re-encoding a window of audio at each step: `[left | chunk | right]` in 80 ms frames. The text it commits is final and is never revised. A buffered stream raises no `<EOU>`/`<EOB>`, so `eou` and `eob` stay 0 and `parakeet_capi_stream_drain_events` returns no events.
+
+The `parakeet_capi_stream_*` calls above work for these models too. `parakeet_capi_stream_begin` and `_begin_lang` use the default window (`parakeet_capi_stream_presets_json` lists them, with `"default":true`). Use `parakeet_capi_stream_begin_opts` to choose another preset, or a custom window, and the language:
+
+```c
+parakeet_stream_opts o;
+parakeet_capi_stream_opts_default(&o);
+o.target_lang = "de";                       // NULL or "" = the model default
+o.preset = PARAKEET_STREAM_PRESET_CUSTOM;   // or an index from the presets JSON, or PARAKEET_STREAM_PRESET_DEFAULT
+o.left_frames = 70; o.chunk_frames = 7; o.right_frames = 7;
+parakeet_stream *s = parakeet_capi_stream_begin_opts(ctx, &o);
+if (!s) { fprintf(stderr, "%s\n", parakeet_capi_last_error(ctx)); }
+```
+
+`parakeet_capi_stream_kind(ctx)` returns `PARAKEET_STREAM_KIND_BUFFERED` for these models and `PARAKEET_STREAM_KIND_CACHE_AWARE` for the EOU and nemotron-3.5 models. `parakeet_capi_stream_info_json(s)` reports the window and the latency. `parakeet_capi_stream_reset(s)` starts a new utterance on the same stream. `parakeet_stream_opts.size` must be `sizeof(parakeet_stream_opts)`, and a cache-aware model accepts only the default preset.
+
+The text does not depend on the feed size: the same audio fed in blocks of 1, 160, 1280 or 7777 samples gives the same tokens (see `test_capi_stream_unified` and `test_unified_stream`, which need the checkpoint). The window per step is set by the preset: latency is `(chunk + right) x 0.08 s`. The default is 1.12 s (`70,7,7`).
+
 The LocalAI backend (in the LocalAI repo) dlopens `libparakeet.so` and uses these symbols directly: the offline `parakeet_capi_transcribe_*` / `parakeet_capi_transcribe_path_json` and the streaming `parakeet_capi_stream_*`. See `include/parakeet_capi.h` for the full API. The C++ streaming session (`pk::StreamingSession`) also exposes per-word timestamps and confidence as words finalize, via `drain_words()` alongside the EOU events, which the CLI `--stream --timestamps` path prints.

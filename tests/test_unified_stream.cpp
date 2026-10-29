@@ -43,6 +43,7 @@ int main() {
     const std::string wav_path = wav ? wav : "tests/fixtures/speech.wav";
     const char* feed_env = std::getenv("PARAKEET_TEST_FEED");
     const int feed = feed_env ? std::max(1, std::atoi(feed_env)) : 0;
+    const char* only_env = std::getenv("PARAKEET_TEST_PRESET");   // optional: run one preset index
 
     pk::Audio a;
     if (!pk::load_audio_16k_mono(wav_path, a)) { std::fprintf(stderr, "audio load failed\n"); return 1; }
@@ -58,6 +59,7 @@ int main() {
     CHECK(!m->config().streaming.present);
 
     for (uint32_t p = 0; p < n_presets; ++p) {
+        if (only_env && (uint32_t)std::atoi(only_env) != p) continue;
         const int L = (int)pktest::pktest_read_u32(base, key(p, "left"));
         const int C = (int)pktest::pktest_read_u32(base, key(p, "chunk"));
         const int R = (int)pktest::pktest_read_u32(base, key(p, "right"));
@@ -97,6 +99,8 @@ int main() {
         CHECK((int)tr.size() == n_steps);
         int bad_steps = 0;
         double worst_enc = 0.0;
+        int worst_step = -1;
+        int slice_violations = 0;
         size_t tok_off = 0;
         for (int s = 0; s < n_steps && s < (int)tr.size(); ++s) {
             const pk::BufferedStreamingSession::Step& st = tr[s];
@@ -123,12 +127,31 @@ int main() {
                     std::fprintf(stderr, "  step %d: encoder slice size %zu != %zu\n", s, st.enc_tm.size(), ref_slice.size());
                     ++bad_steps;
                 } else {
+                    double step_max = 0.0;
                     for (size_t i = 0; i < ref_slice.size(); ++i)
-                        worst_enc = std::max(worst_enc, (double)std::fabs(ref_slice[i] - st.enc_tm[i]));
+                        step_max = std::max(step_max, (double)std::fabs(ref_slice[i] - st.enc_tm[i]));
+                    if (step_max > worst_enc) { worst_enc = step_max; worst_step = s; }
+                    // Tolerance for the encoder slice (after the prompt). Tokens are the hard gate.
+                    // Steady state (full left context): measured 7e-7 in f32 on both clips, so 1e-5.
+                    // Warm-up (left context still growing): the slice gap comes from the mel front end,
+                    // not the encoder. Feeding NeMo's own mel into our encoder gives <= 1.9e-5 in warm-up
+                    // (out/win measurement), while our mel differs from NeMo's by 1.2e-4 to 2.3e-4 there,
+                    // amplified by per-feature normalization over the few window frames. Hence 1e-3.
+                    const bool warm = st.plan.left < (int64_t)L * 1280;
+                    const double tol = warm ? 1e-3 : 1e-5;
+                    if (step_max > tol) {
+                        ++slice_violations;
+                        std::fprintf(stderr, "  step %d (%s): slice max|diff| %.3e > %.1e\n", s, warm ? "warm-up" : "steady", step_max, tol);
+                    }
+                    if (std::getenv("PARAKEET_TEST_VERBOSE"))
+                        std::fprintf(stderr, "  step %3d: ctx L=%lld C=%lld R=%lld win=%lld dec=%d slice max|diff|=%.3e\n",
+                                     s, (long long)st.plan.left, (long long)st.plan.chunk, (long long)st.plan.right,
+                                     (long long)(st.plan.left + st.plan.chunk + st.plan.right), st.dec_frames, step_max);
                 }
             }
         }
         CHECK(bad_steps == 0);
+        CHECK(slice_violations == 0);
 
         const std::vector<int32_t>& got = sess.tokens();
         const bool tok_ok = got == ref_final;
@@ -136,7 +159,8 @@ int main() {
         std::fprintf(stderr, "[stream] preset %d: %d/%d steps match, final tokens %s (%zu), text %s\n",
                      (int)p, n_steps - bad_steps, n_steps, tok_ok ? "match" : "DIFFER", got.size(),
                      got_text == ref_text ? "match" : "DIFFER");
-        std::fprintf(stderr, "[stream] preset %d: encoder slice max|diff| = %.3e\n", (int)p, worst_enc);
+        std::fprintf(stderr, "[stream] preset %d: encoder slice max|diff| = %.3e (worst step %d of %d, dec %d)\n",
+                     (int)p, worst_enc, worst_step, n_steps, worst_step >= 0 ? (int)tr[worst_step].dec_frames : -1);
         CHECK(tok_ok);
         CHECK(got_text == ref_text);
     }

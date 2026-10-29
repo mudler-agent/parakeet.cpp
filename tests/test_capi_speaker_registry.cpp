@@ -19,7 +19,7 @@ static int failures = 0;
     } while (0)
 
 int main() {
-    CHECK(parakeet_capi_abi_version() == 10);
+    CHECK(parakeet_capi_abi_version() == 11);
 
     parakeet_speaker_registry* reg = parakeet_capi_speaker_registry_new();
     CHECK(reg != nullptr);

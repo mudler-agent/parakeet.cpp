@@ -67,7 +67,7 @@ int main() {
     const char* alt = std::getenv("PARAKEET_TEST_VD_ALT_GGUF");
     const char* diar_path = std::getenv("PARAKEET_TEST_DIAR_GGUF");
 
-    CHECK(parakeet_capi_abi_version() == 10);
+    CHECK(parakeet_capi_abi_version() == 11);
     parakeet_ctx* a = parakeet_capi_load(vd);
     if (!a) { std::fprintf(stderr, "FAIL: load speaker model\n"); return 77; }
     const std::string fam_a = parakeet_capi_speaker_encoder_family(a);

@@ -159,7 +159,7 @@ All models below are published as GGUF in [mudler/parakeet-cpp-gguf](https://hug
 | [parakeet-tdt_ctc-1.1b](https://huggingface.co/nvidia/parakeet-tdt_ctc-1.1b) | hybrid TDT+CTC | 1.1B | English |
 | [parakeet_realtime_eou_120m-v1](https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1) | RNNT, streaming | 120M | Cache-aware streaming with end-of-utterance events (`--stream`) |
 | [nemotron-3.5-asr-streaming-0.6b](https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b) | RNNT, streaming | 0.6B | 40+ locales, language set with `--lang` (default `auto`), offline and streaming. OpenMDW-1.1 |
-| [nemotron-labs-unified-asr-0.6b](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b) | RNNT, unified | 0.6B | 40+ locales, language set with `--lang` (default `auto`). Offline only for now; buffered streaming is not implemented yet. OpenMDW-1.1 |
+| [nemotron-labs-unified-asr-0.6b](https://huggingface.co/nvidia/nemotron-labs-unified-asr-0.6b) | RNNT, unified | 0.6B | 40+ locales, language set with `--lang` (default `auto`), offline and buffered streaming (`--stream`, window set with `--stream-latency` or `--stream-context`). OpenMDW-1.1 |
 | [Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization) | Sortformer | n/a | Who spoke when, up to 8 speakers. See [diarization.md](docs/diarization.md) |
 | [parakeet-ultra](https://huggingface.co/moondream/parakeet-ultra) | TDT + VAD head | 0.6B | Moondream, from parakeet-tdt-0.6b-v3. CC-BY-4.0. Not NeMo-validated |
 | [parakeet-redux](https://huggingface.co/moondream/parakeet-redux) | TDT + VAD head | 0.6B | Moondream, ternary encoder. CPU only, offline only. CC-BY-4.0. Not NeMo-validated |
@@ -229,7 +229,7 @@ parakeet_capi_free(ctx);
 ```
 
 - **Surface:** offline and streaming transcription (text or JSON with word and token timestamps), batched transcription, VAD (offline and streaming), diarization, speaker-attributed ASR, sound events, the scene stream, speaker identification, bundle loading and the concurrency pool.
-- **ABI:** the current version is **10** (`parakeet_capi_abi_version()`). Later additions (VAD, bundle, encoder fingerprint, concurrency) are additive and keep ABI 10. LocalAI depends on the offline and streaming transcription symbols, so do not change their signatures without a coordinated bump.
+- **ABI:** the current version is **11** (`parakeet_capi_abi_version()`). v11 adds buffered streaming for unified checkpoints (`parakeet_capi_stream_begin_opts` and the stream kind, caps, presets and info queries). Later additions (VAD, bundle, encoder fingerprint, concurrency) are additive. LocalAI depends on the offline and streaming transcription symbols, so do not change their signatures without a coordinated bump.
 - More examples and the JSON shapes: [capi.md](docs/capi.md). Exact signatures: `include/parakeet_capi.h`.
 
 ---

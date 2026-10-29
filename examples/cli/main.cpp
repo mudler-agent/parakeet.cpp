@@ -5,6 +5,7 @@
 #include "model_loader.hpp"
 #include "audio_io.hpp"
 #include "streaming.hpp"
+#include "buffered_streaming.hpp"
 #include "transcription.hpp"
 #include "ggml_graph.hpp"   // pk::set_num_threads, pk::global_backend
 #include "backend.hpp"      // pk::ensure_weights_realized
@@ -243,7 +244,7 @@ static int cmd_info(int argc, char** argv) {
                 c.conv_causal ? "true" : "false");
     if (c.unified.present) {
         const pk::UnifiedCfg& u = c.unified;
-        std::printf("  unified         : yes (offline only; buffered streaming not available yet)\n");
+        std::printf("  unified         : yes (offline, and buffered streaming with --stream)\n");
         std::printf("  conv_context    : %s (informational)\n", u.conv_context_style.c_str());
         std::printf("  valid_length    : %s (encoder gets floor(samples/hop) mel frames)\n",
                     u.valid_length ? "true" : "false");
@@ -252,6 +253,11 @@ static int cmd_info(int argc, char** argv) {
             std::printf("%s[%d,%d,%d]%s", i ? " " : "", u.presets[3*i], u.presets[3*i+1],
                         u.presets[3*i+2], i == u.default_preset ? "*" : "");
         std::printf("\n  (* = default preset)\n");
+        for (uint32_t i = 0; i < u.num_presets(); ++i)
+            std::printf("  stream preset %u : left %.2f s, chunk %.2f s, right %.2f s, latency %.2f s%s\n",
+                        i, u.presets[3*i] * 0.08, u.presets[3*i+1] * 0.08, u.presets[3*i+2] * 0.08,
+                        (u.presets[3*i+1] + u.presets[3*i+2]) * 0.08,
+                        i == u.default_preset ? " (default)" : "");
     }
     if (c.streaming.present) {
         const pk::StreamingCfg& s = c.streaming;
@@ -313,18 +319,129 @@ static float model_frame_sec(const pk::Model& model) {
 //
 // When `timestamps` is set, also prints one line per finalized word
 // (`<start>-<end>  <word>  (<conf>)`) after the running text/EOU line.
+// Window and feed options for --stream on a unified model (buffered streaming).
+struct StreamWindowArgs {
+    std::string latency;   // --stream-latency SEC: the preset whose chunk + right context matches
+    std::string context;   // --stream-context L,C,R: left,chunk,right in ms (floored to 80 ms frames)
+    int feed_ms = 0;       // --feed-ms N: PCM block size fed per call (0 = 80 ms)
+};
+
+// Buffered streaming for a unified checkpoint (pk::BufferedStreamingSession):
+// each step re-encodes the [left | chunk | right] window, so the text is
+// committed step by step and never revised.
+static int cmd_transcribe_buffered(const pk::ModelLoader& ml, const pk::Audio& audio,
+                                   bool timestamps, const std::string& lang,
+                                   const StreamWindowArgs& win) {
+    const pk::ParakeetConfig& cfg = ml.config();
+    const pk::UnifiedCfg& u = cfg.unified;
+    int L = 0, C = 0, R = 0;
+    if (!win.latency.empty()) {
+        char* end = nullptr;
+        const double sec = std::strtod(win.latency.c_str(), &end);
+        const long sum = std::isfinite(sec) ? std::lround(sec * 12.5) : 0;   // 80 ms frames: chunk + right
+        if (end == win.latency.c_str() || *end != '\0' || sum < 1 || std::fabs(sec - sum * 0.08) > 1e-6) {
+            std::fprintf(stderr, "parakeet-cli: --stream-latency must be a multiple of 0.08 s (e.g. 1.12)\n");
+            return 2;
+        }
+        bool found = false;
+        for (uint32_t i = 0; i < u.num_presets() && !found; ++i) {
+            if (u.presets[3*i+1] + u.presets[3*i+2] == sum) {
+                L = u.presets[3*i]; C = u.presets[3*i+1]; R = u.presets[3*i+2]; found = true;
+            }
+        }
+        if (!found) {
+            std::fprintf(stderr, "parakeet-cli: no preset has latency %s s; available:", win.latency.c_str());
+            for (uint32_t i = 0; i < u.num_presets(); ++i)
+                std::fprintf(stderr, " %.2f", (u.presets[3*i+1] + u.presets[3*i+2]) * 0.08);
+            std::fprintf(stderr, " (or use --stream-context L,C,R)\n");
+            return 2;
+        }
+    } else if (!win.context.empty()) {
+        long ms[3] = {0, 0, 0};
+        char* p = const_cast<char*>(win.context.c_str());
+        for (int k = 0; k < 3; ++k) {
+            char* end = nullptr;
+            ms[k] = std::strtol(p, &end, 10);
+            if (end == p || (k < 2 ? *end != ',' : *end != '\0') || ms[k] < 0) {
+                std::fprintf(stderr, "parakeet-cli: --stream-context must be L,C,R in ms (e.g. 5600,560,560)\n");
+                return 2;
+            }
+            p = end + 1;
+        }
+        L = (int)(ms[0] / 80);
+        C = (int)(ms[1] / 80);
+        R = (int)(ms[2] / 80);
+        if (C < 1) {
+            std::fprintf(stderr, "parakeet-cli: --stream-context chunk must be at least 80 ms\n");
+            return 2;
+        }
+    } else {
+        const uint32_t d = u.default_preset;
+        if (d >= u.num_presets()) { std::fprintf(stderr, "parakeet-cli: model has no stream preset\n"); return 1; }
+        L = u.presets[3*d]; C = u.presets[3*d+1]; R = u.presets[3*d+2];
+    }
+    if (win.feed_ms < 0) { std::fprintf(stderr, "parakeet-cli: --feed-ms must be > 0\n"); return 2; }
+    const size_t feed = win.feed_ms > 0 ? (size_t)win.feed_ms * 16 : 1280;   // samples per call
+
+    try {
+        pk::BufferedStreamingSession sess(ml, L, C, R, lang);
+        std::fprintf(stderr, "[window] left %d, chunk %d, right %d frames (latency %.2f s, feed %zu samples)\n",
+                     L, C, R, (C + R) * 0.08, feed);
+        std::vector<pk::Word> all_words;
+        std::printf("[stream] ");
+        std::fflush(stdout);
+        auto emit = [&]() {
+            std::string delta = sess.take_new_text();
+            if (!delta.empty()) {
+                std::printf("%s", delta.c_str());
+                std::fflush(stdout);
+            }
+            if (timestamps) {
+                std::vector<pk::Word> ws = sess.drain_words();
+                all_words.insert(all_words.end(), ws.begin(), ws.end());
+            }
+        };
+        for (size_t off = 0; off < audio.samples.size(); off += feed) {
+            const size_t n = std::min(feed, audio.samples.size() - off);
+            sess.feed(audio.samples.data() + off, (int)n);
+            emit();
+        }
+        sess.finalize();
+        emit();
+        std::printf("\n");
+        std::printf("[stream:final] %s\n", sess.text().c_str());
+        if (timestamps) {
+            for (const pk::Word& w : all_words)
+                std::printf("%.2f-%.2f  %s  (%.2f)\n", w.start, w.end, w.text.c_str(), w.conf);
+        }
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "parakeet-cli: streaming failed: %s\n", e.what());
+        return 1;
+    }
+    return 0;
+}
+
 static int cmd_transcribe_stream(const std::string& model, const std::string& input,
-                                 bool timestamps, const std::string& lang) {
+                                 bool timestamps, const std::string& lang,
+                                 const StreamWindowArgs& win) {
     pk::ModelLoader ml;
     if (!ml.load(model)) {
         std::fprintf(stderr, "parakeet-cli: failed to load model %s\n", model.c_str());
         return 1;
     }
     if (ml.config().unified.present) {
+        pk::Audio audio;
+        if (!load_audio_arg_16k_mono(input, audio)) {
+            std::string display = input_display_name(input);
+            std::fprintf(stderr, "parakeet-cli: failed to load audio %s\n", display.c_str());
+            return 1;
+        }
+        return cmd_transcribe_buffered(ml, audio, timestamps, lang, win);
+    }
+    if (!win.latency.empty() || !win.context.empty() || win.feed_ms != 0) {
         std::fprintf(stderr,
-            "parakeet-cli: --stream is not available for unified models yet; "
-            "%s supports offline transcription only\n", model.c_str());
-        return 1;
+            "parakeet-cli: --stream-latency, --stream-context and --feed-ms apply to unified models only\n");
+        return 2;
     }
     if (!ml.config().streaming.present) {
         std::fprintf(stderr,
@@ -481,6 +598,7 @@ static int cmd_transcribe(int argc, char** argv) {
     bool timestamps = false;
     bool json = false;
     bool vad = false;
+    StreamWindowArgs stream_win;
     std::string vad_model, vad_component, component;
     VadOverrides vad_ov;
     pk::WordFilter word_filter;
@@ -510,6 +628,12 @@ static int cmd_transcribe(int argc, char** argv) {
             lang = argv[++i];
         } else if (std::strcmp(argv[i], "--stream") == 0) {
             stream = true;
+        } else if (std::strcmp(argv[i], "--stream-latency") == 0 && i + 1 < argc) {
+            stream_win.latency = argv[++i];
+        } else if (std::strcmp(argv[i], "--stream-context") == 0 && i + 1 < argc) {
+            stream_win.context = argv[++i];
+        } else if (std::strcmp(argv[i], "--feed-ms") == 0 && i + 1 < argc) {
+            stream_win.feed_ms = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--timestamps") == 0) {
             timestamps = true;
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
@@ -578,6 +702,10 @@ static int cmd_transcribe(int argc, char** argv) {
     // the persistent-backend default (kDefaultThreads) is used.
     if (threads > 0) pk::set_num_threads(threads);
 
+    if (!stream && (!stream_win.latency.empty() || !stream_win.context.empty() || stream_win.feed_ms != 0)) {
+        std::fprintf(stderr, "parakeet-cli: --stream-latency, --stream-context and --feed-ms need --stream\n");
+        return 2;
+    }
     if (stream) {
         if (word_filter.active()) {
             std::fprintf(stderr, "parakeet-cli: the word filter is offline only\n");
@@ -601,7 +729,7 @@ static int cmd_transcribe(int argc, char** argv) {
                 "parakeet-cli: --json is not supported with --stream\n");
             return 2;
         }
-        return cmd_transcribe_stream(model, input, timestamps, lang);
+        return cmd_transcribe_stream(model, input, timestamps, lang, stream_win);
     }
 
     // Resolve the decoder selector.

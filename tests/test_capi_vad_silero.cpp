@@ -105,7 +105,7 @@ int main() {
     parakeet_ctx* ctx = parakeet_capi_load(silero);
     if (!ctx) { std::fprintf(stderr, "load failed\n"); return 1; }
     CHECK(parakeet_capi_model_kind(ctx) == PARAKEET_MODEL_KIND_VAD);
-    CHECK(parakeet_capi_abi_version() == 10);
+    CHECK(parakeet_capi_abi_version() == 11);
 
     // 1. Defaults: the document, regions on the original timeline.
     const std::string j = take(parakeet_capi_vad_pcm_json(ctx, clip.data(), (int)clip.size(), 16000, nullptr));

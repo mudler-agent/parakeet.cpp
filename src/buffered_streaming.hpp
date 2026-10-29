@@ -10,6 +10,7 @@
 #include "transcription.hpp"
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -58,6 +59,34 @@ private:
     bool done_ = false;
 };
 
+// Failure latch of a stream. run() calls its function; if the function throws, the
+// latch is set, the exception is rethrown, and every later check()/run() throws
+// std::runtime_error until clear(). A stream that failed midway (some planned steps
+// were not run) must not produce more output. Pure, no model.
+class StepFailureLatch {
+public:
+    void check() const {
+        if (failed_) throw std::runtime_error("buffered streaming: an earlier step failed (call reset)");
+    }
+
+    template <class F>
+    void run(F&& f) {
+        check();
+        try {
+            f();
+        } catch (...) {
+            failed_ = true;
+            throw;
+        }
+    }
+
+    void clear() { failed_ = false; }
+    bool failed() const { return failed_; }
+
+private:
+    bool failed_ = false;
+};
+
 // Newly emitted bytes of `current` (the full transcript) after the bytes already
 // emitted, which are kept in `emitted` and extended by the returned delta. Pure, no model.
 //   * When `emitted` is no longer a prefix of `current` (the transcript was revised
@@ -86,13 +115,16 @@ public:
                              const std::string& target_lang = "");
 
     // Feed 16 kHz mono PCM. Runs every step that is ready. Throws after finalize().
+    // If a step throws, the stream is failed: this call rethrows, and every later
+    // feed, finalize, take_new_text and drain_words throws until reset().
     void feed(const float* pcm, int n);
 
     // End of stream: runs the last step on the remaining audio, if any was received.
-    // Calling it again does nothing.
+    // Calling it again does nothing. Throws if the stream failed (see feed).
     void finalize();
 
-    // Start a new utterance: clears the audio, the context, the decoder state and the text.
+    // Start a new utterance: clears the audio, the context, the decoder state, the text
+    // and a failed state.
     void reset();
 
     // Newly committed text since the last call (empty if none). A trailing incomplete
@@ -153,6 +185,7 @@ private:
     int64_t received_ = 0;
     int64_t frames_done_ = 0;           // encoder frames decoded so far (absolute offset)
     bool finalized_ = false;
+    StepFailureLatch latch_;            // set when a step throws; cleared by reset()
 
     // Text and words, as StreamingSession.
     std::vector<int32_t> hyp_;

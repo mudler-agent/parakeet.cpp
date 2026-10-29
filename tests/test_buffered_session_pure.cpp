@@ -4,6 +4,7 @@
 #include "buffered_streaming.hpp"
 
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -108,10 +109,59 @@ void test_text_delta() {
     }
 }
 
+// True when f() throws std::runtime_error.
+template <class F>
+bool throws_runtime_error(F&& f) {
+    try {
+        f();
+    } catch (const std::runtime_error&) {
+        return true;
+    } catch (...) {
+    }
+    return false;
+}
+
+void test_failure_latch() {
+    pk::StepFailureLatch latch;
+    int ran = 0;
+
+    // A normal call runs and leaves the latch clear.
+    latch.run([&] { ++ran; });
+    CHECK(ran == 1);
+    CHECK(!latch.failed());
+
+    // A throwing call rethrows the original exception and sets the latch.
+    bool rethrown = false;
+    try {
+        latch.run([] { throw std::logic_error("step"); });
+    } catch (const std::logic_error&) {
+        rethrown = true;
+    }
+    CHECK(rethrown);
+    CHECK(latch.failed());
+
+    // Every later check and run throws std::runtime_error, and the function is not called.
+    CHECK(throws_runtime_error([&] { latch.check(); }));
+    CHECK(throws_runtime_error([&] { latch.run([&] { ++ran; }); }));
+    CHECK(ran == 1);
+
+    // clear() (what reset does) makes the latch usable again.
+    latch.clear();
+    CHECK(!latch.failed());
+    latch.run([&] { ++ran; });
+    CHECK(ran == 2);
+
+    // A failure of a function that throws a runtime_error is also latched.
+    CHECK(throws_runtime_error([&] { latch.run([] { throw std::runtime_error("boom"); }); }));
+    CHECK(latch.failed());
+    CHECK(throws_runtime_error([&] { latch.check(); }));
+}
+
 }  // namespace
 
 int main() {
     test_text_delta();
+    test_failure_latch();
 
     if (failures == 0) std::printf("test_buffered_session_pure: all checks passed\n");
     return failures ? 1 : 0;

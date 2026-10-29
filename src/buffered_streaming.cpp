@@ -109,6 +109,7 @@ void BufferedStreamingSession::reset() {
     received_ = 0;
     frames_done_ = 0;
     finalized_ = false;
+    latch_.clear();
     hyp_.clear();
     text_.clear();
     emitted_.clear();
@@ -120,23 +121,31 @@ void BufferedStreamingSession::reset() {
 }
 
 void BufferedStreamingSession::feed(const float* pcm, int n) {
+    latch_.check();
     if (finalized_) throw std::runtime_error("buffered streaming: feed after finalize (call reset)");
     if (n < 0 || (!pcm && n > 0)) throw std::invalid_argument("buffered streaming: invalid PCM buffer");
-    if (n > 0) {
-        pcm_.insert(pcm_.end(), pcm, pcm + n);
-        received_ += n;
-    }
-    std::vector<BufferedStepPlan> plans;
-    schedule_.advance(received_, plans);
-    for (const BufferedStepPlan& p : plans) run_step(p);
+    // The schedule advances before the steps run, so a throwing step leaves planned
+    // steps behind: the latch stops the stream instead of letting them be skipped silently.
+    latch_.run([&] {
+        if (n > 0) {
+            pcm_.insert(pcm_.end(), pcm, pcm + n);
+            received_ += n;
+        }
+        std::vector<BufferedStepPlan> plans;
+        schedule_.advance(received_, plans);
+        for (const BufferedStepPlan& p : plans) run_step(p);
+    });
 }
 
 void BufferedStreamingSession::finalize() {
+    latch_.check();
     if (finalized_) return;
-    BufferedStepPlan last;
-    if (schedule_.finish(received_, last)) run_step(last);
-    finalized_ = true;
-    regroup_words(/*flush_all=*/true);
+    latch_.run([&] {
+        BufferedStepPlan last;
+        if (schedule_.finish(received_, last)) run_step(last);
+        finalized_ = true;
+        regroup_words(/*flush_all=*/true);
+    });
 }
 
 void BufferedStreamingSession::run_step(const BufferedStepPlan& plan) {
@@ -261,10 +270,12 @@ std::string take_text_delta(std::string& emitted, const std::string& current, bo
 }
 
 std::string BufferedStreamingSession::take_new_text() {
+    latch_.check();
     return take_text_delta(emitted_, text_, finalized_);
 }
 
 std::vector<Word> BufferedStreamingSession::drain_words() {
+    latch_.check();
     std::vector<Word> out;
     for (size_t i = words_taken_; i < words_finalized_ && i < words_.size(); ++i)
         out.push_back(words_[i]);

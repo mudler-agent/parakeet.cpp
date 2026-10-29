@@ -131,6 +131,7 @@ set(PARAKEET_SRC
     src/encoder.cpp
     src/streaming_encoder.cpp
     src/streaming.cpp
+    src/buffered_streaming.cpp
     src/ctc_decoder.cpp
     src/prediction.cpp
     src/joint.cpp

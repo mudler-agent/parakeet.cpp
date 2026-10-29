@@ -87,6 +87,8 @@ pk_add_test(test_transcribe_nemotron)
 pk_add_test(test_unified_offline)
 pk_add_test(test_unified_load_negative)
 pk_add_test(test_unified_synthetic)  # CPU-only, no checkpoint: runs everywhere
+pk_add_test(test_rc_mask)           # CPU-only: window-relative RC mask vs NeMo fixture
+set_tests_properties(test_rc_mask PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 pk_add_test(test_transcribe_vad)
 pk_add_test(test_vad_batched)
 pk_add_test(test_streaming_decode)

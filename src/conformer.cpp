@@ -309,7 +309,8 @@ ggml_tensor* ConformerLayer::build_graph_batched(ggml_context* ctx,
                                                  ggml_tensor* pe, int pos_len,
                                                  const std::vector<int>& valid_len,
                                                  GraphInputPool& pool,
-                                                 int att_left, int att_right) const {
+                                                 int att_left, int att_right,
+                                                 const RcMask* rc) const {
     const int D  = d_model_;
     const int K  = conv_kernel_;
     const float ln_eps = 1e-5f;            // LayerNorm eps (NeMo nn.LayerNorm default)
@@ -361,7 +362,7 @@ ggml_tensor* ConformerLayer::build_graph_batched(ggml_context* ctx,
     ggml_tensor* attn_out = local_attn
         ? attn.build_graph_batched_local_chunked(ctx, attn_in, T, B, pe, pos_len, valid_len,
                                                  att_left, att_right, pool)    // [D, T, B]
-        : attn.build_graph_batched(ctx, attn_in, T, B, pe, pos_len, valid_len, pool);
+        : attn.build_graph_batched(ctx, attn_in, T, B, pe, pos_len, valid_len, pool, rc);
     r = ggml_add(ctx, r, attn_out);
 
     // === Stage C: r = r + conv(norm_conv(r)). ===
@@ -388,7 +389,8 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
                                          int T, ggml_tensor* pe, int pos_len,
                                          int valid_len,
                                          GraphInputPool& pool,
-                                         int att_left, int att_right) const {
+                                         int att_left, int att_right,
+                                         const RcMask* rc) const {
     const int D  = d_model_;
     const int K  = conv_kernel_;
     const float ln_eps = 1e-5f;            // LayerNorm eps (NeMo nn.LayerNorm default)
@@ -439,7 +441,8 @@ ggml_tensor* ConformerLayer::build_graph(ggml_context* ctx, ggml_tensor* xt,
     ggml_tensor* attn_out = local_attn
         ? attn.build_graph_local_chunked(ctx, attn_in, T, pe, pos_len, valid_len,
                                          att_left, att_right, pool)    // [D, T]
-        : attn.build_graph(ctx, attn_in, T, pe, pos_len, valid_len, pool); // [D, T]
+        : attn.build_graph(ctx, attn_in, T, pe, pos_len, valid_len, pool,
+                           -1, -1, rc); // [D, T]
     r = ggml_add(ctx, r, attn_out);
 
     // === Stage C: r = r + conv(norm_conv(r)). ===

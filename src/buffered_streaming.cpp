@@ -111,7 +111,7 @@ void BufferedStreamingSession::reset() {
     finalized_ = false;
     hyp_.clear();
     text_.clear();
-    text_taken_ = 0;
+    emitted_.clear();
     word_tokens_.clear();
     words_.clear();
     words_finalized_ = 0;
@@ -228,11 +228,40 @@ void BufferedStreamingSession::regroup_words(bool flush_all) {
     if (words_finalized_ < words_taken_) words_finalized_ = words_taken_;
 }
 
-std::string BufferedStreamingSession::take_new_text() {
-    if (text_taken_ >= text_.size()) return std::string();
-    std::string delta = text_.substr(text_taken_);
-    text_taken_ = text_.size();
+namespace {
+
+// End of the longest prefix of s[from..] that does not end inside a UTF-8 sequence.
+// A lead byte whose sequence is not complete yet moves the end back to it.
+size_t utf8_complete_end(const std::string& s, size_t from) {
+    const size_t n = s.size();
+    for (size_t back = 1; back <= 3 && back <= n - from; ++back) {
+        const unsigned char c = (unsigned char)s[n - back];
+        if ((c & 0xC0) == 0x80) continue;   // continuation byte: the lead byte is further back
+        size_t need = 1;
+        if (c >= 0xF0 && c <= 0xF4)      need = 4;
+        else if (c >= 0xE0 && c <= 0xEF) need = 3;
+        else if (c >= 0xC2 && c <= 0xDF) need = 2;
+        return need > back ? n - back : n;
+    }
+    return n;
+}
+
+} // namespace
+
+std::string take_text_delta(std::string& emitted, const std::string& current, bool flush) {
+    size_t k = 0;   // length of the common prefix of emitted and current
+    const size_t lim = std::min(emitted.size(), current.size());
+    while (k < lim && emitted[k] == current[k]) ++k;
+    if (k < emitted.size()) return std::string();   // revised under emitted bytes: hold back
+    const size_t end = flush ? current.size() : utf8_complete_end(current, k);
+    if (end <= k) return std::string();
+    std::string delta = current.substr(k, end - k);
+    emitted += delta;
     return delta;
+}
+
+std::string BufferedStreamingSession::take_new_text() {
+    return take_text_delta(emitted_, text_, finalized_);
 }
 
 std::vector<Word> BufferedStreamingSession::drain_words() {

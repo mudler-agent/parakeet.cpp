@@ -58,6 +58,14 @@ private:
     bool done_ = false;
 };
 
+// Newly emitted bytes of `current` (the full transcript) after the bytes already
+// emitted, which are kept in `emitted` and extended by the returned delta. Pure, no model.
+//   * When `emitted` is no longer a prefix of `current` (the transcript was revised
+//     under bytes already sent), nothing is returned until `current` agrees again.
+//   * A trailing incomplete UTF-8 sequence is held back until it completes, unless
+//     `flush` is set (end of stream), when every byte is returned.
+std::string take_text_delta(std::string& emitted, const std::string& current, bool flush);
+
 // Buffered (re-encoding) streaming for the unified checkpoints
 // (att_context_style chunked_limited_with_rc, e.g. nvidia/nemotron-labs-unified-asr-0.6b).
 //
@@ -87,7 +95,8 @@ public:
     // Start a new utterance: clears the audio, the context, the decoder state and the text.
     void reset();
 
-    // Newly committed text since the last call (empty if none).
+    // Newly committed text since the last call (empty if none). A trailing incomplete
+    // UTF-8 sequence is held back until it completes, or until finalize(). See take_text_delta.
     std::string take_new_text();
 
     // Words finalized since the last drain. A word is final once the next word starts,
@@ -148,7 +157,7 @@ private:
     // Text and words, as StreamingSession.
     std::vector<int32_t> hyp_;
     std::string text_;
-    size_t text_taken_ = 0;
+    std::string emitted_;               // text already returned by take_new_text
     std::vector<TokenInfo> word_tokens_;
     std::vector<Word> words_;
     size_t words_finalized_ = 0;

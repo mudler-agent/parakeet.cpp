@@ -87,6 +87,15 @@ private:
     bool failed_ = false;
 };
 
+// Largest buffered window, left + chunk + right, in 80 ms frames (320 s).
+constexpr int64_t kMaxBufferedWindowFrames = 4000;
+
+// Checks a window in 80 ms frames: left >= 0, chunk >= 1, right >= 0, and every
+// part and their sum at most kMaxBufferedWindowFrames. Returns "" when the window is
+// valid, else the reason. Done in 64-bit arithmetic, so no argument can overflow the
+// check. Pure, no model.
+std::string check_buffered_window(int64_t left, int64_t chunk, int64_t right);
+
 // Decimal number with `precision` fraction digits and '.' as the separator, whatever
 // the C locale's LC_NUMERIC is (printf-style %f follows it, so JSON built with it can
 // read "1,12" on a comma-decimal locale).
@@ -177,6 +186,9 @@ private:
 
     const ModelLoader& ml_;
     int left_, chunk_, right_;          // frames
+    // Initialised right after the window, so an invalid window throws before the model
+    // parts below read any weight.
+    [[maybe_unused]] bool window_ok_;
     int d_model_ = 0;
     int blank_id_ = 0;
     int max_symbols_ = 10;

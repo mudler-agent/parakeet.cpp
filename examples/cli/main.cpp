@@ -338,7 +338,7 @@ static int cmd_transcribe_buffered(const pk::ModelLoader& ml, const pk::Audio& a
     if (!win.latency.empty()) {
         char* end = nullptr;
         const double sec = std::strtod(win.latency.c_str(), &end);
-        const long sum = std::isfinite(sec) ? std::lround(sec * 12.5) : 0;   // 80 ms frames: chunk + right
+        const long sum = (std::isfinite(sec) && std::fabs(sec) < 1e6) ? std::lround(sec * 12.5) : 0;   // 80 ms frames: chunk + right
         if (end == win.latency.c_str() || *end != '\0' || sum < 1 || std::fabs(sec - sum * 0.08) > 1e-6) {
             std::fprintf(stderr, "parakeet-cli: --stream-latency must be a multiple of 0.08 s (e.g. 1.12)\n");
             return 2;
@@ -357,24 +357,30 @@ static int cmd_transcribe_buffered(const pk::ModelLoader& ml, const pk::Audio& a
             return 2;
         }
     } else if (!win.context.empty()) {
-        long ms[3] = {0, 0, 0};
+        long long ms[3] = {0, 0, 0};
         char* p = const_cast<char*>(win.context.c_str());
         for (int k = 0; k < 3; ++k) {
             char* end = nullptr;
-            ms[k] = std::strtol(p, &end, 10);
+            ms[k] = std::strtoll(p, &end, 10);
             if (end == p || (k < 2 ? *end != ',' : *end != '\0') || ms[k] < 0) {
                 std::fprintf(stderr, "parakeet-cli: --stream-context must be L,C,R in ms (e.g. 5600,560,560)\n");
                 return 2;
             }
             p = end + 1;
         }
-        L = (int)(ms[0] / 80);
-        C = (int)(ms[1] / 80);
-        R = (int)(ms[2] / 80);
-        if (C < 1) {
+        // 64-bit frame counts: a huge value is refused by check_buffered_window, not wrapped by a cast.
+        const int64_t fL = ms[0] / 80, fC = ms[1] / 80, fR = ms[2] / 80;
+        if (fC < 1) {
             std::fprintf(stderr, "parakeet-cli: --stream-context chunk must be at least 80 ms\n");
             return 2;
         }
+        if (const std::string why = pk::check_buffered_window(fL, fC, fR); !why.empty()) {
+            std::fprintf(stderr, "parakeet-cli: --stream-context: %s\n", why.c_str());
+            return 2;
+        }
+        L = (int)fL;
+        C = (int)fC;
+        R = (int)fR;
     } else {
         const uint32_t d = u.default_preset;
         if (d >= u.num_presets()) { std::fprintf(stderr, "parakeet-cli: model has no stream preset\n"); return 1; }

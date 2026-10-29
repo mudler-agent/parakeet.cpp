@@ -80,13 +80,23 @@ bool BufferedSchedule::finish(int64_t total, BufferedStepPlan& out) {
 // BufferedStreamingSession
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// Throws std::invalid_argument for a window check_buffered_window refuses; true otherwise.
+bool window_or_throw(int left, int chunk, int right) {
+    if (const std::string why = check_buffered_window(left, chunk, right); !why.empty())
+        throw std::invalid_argument("buffered streaming: " + why);
+    return true;
+}
+
+} // namespace
+
 BufferedStreamingSession::BufferedStreamingSession(const ModelLoader& ml, int left, int chunk,
                                                    int right, const std::string& target_lang)
     : ml_(ml), left_(left), chunk_(chunk), right_(right),
+      window_ok_(window_or_throw(left, chunk, right)),
       mel_(ml), enc_(ml), pred_(ml), joint_(ml), prompt_(ml),
       schedule_(left, chunk, right) {
-    if (left < 0 || chunk < 1 || right < 0)
-        throw std::invalid_argument("buffered streaming: need left >= 0, chunk >= 1, right >= 0 (frames)");
     const ParakeetConfig& cfg = ml.config();
     if (!cfg.unified.present)
         throw std::runtime_error("buffered streaming needs a unified checkpoint (parakeet.unified.present)");
@@ -260,6 +270,15 @@ size_t utf8_complete_end(const std::string& s, size_t from) {
 }
 
 } // namespace
+
+std::string check_buffered_window(int64_t left, int64_t chunk, int64_t right) {
+    if (left < 0 || chunk < 1 || right < 0)
+        return "stream window needs left >= 0, chunk >= 1 and right >= 0 (80 ms frames)";
+    const int64_t max = kMaxBufferedWindowFrames;
+    if (left > max || chunk > max || right > max || left + chunk + right > max)
+        return "stream window is larger than 4000 frames (320 s) in total, left + chunk + right";
+    return std::string();
+}
 
 std::string format_fixed(double v, int precision) {
     std::ostringstream os;

@@ -3,6 +3,7 @@
 // UTF-8 hold-back), and is extended by the other error-path cases in this file.
 #include "buffered_streaming.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -157,11 +158,90 @@ void test_failure_latch() {
     CHECK(throws_runtime_error([&] { latch.check(); }));
 }
 
+void test_window_bounds() {
+    // Valid windows, including the limit itself.
+    CHECK(pk::check_buffered_window(70, 13, 13).empty());
+    CHECK(pk::check_buffered_window(0, 1, 0).empty());
+    CHECK(pk::check_buffered_window(0, 4000, 0).empty());
+    CHECK(pk::check_buffered_window(3000, 500, 500).empty());
+    CHECK(pk::check_buffered_window(0, 1, 3999).empty());
+
+    // Refused: chunk below 1, negative parts.
+    CHECK(!pk::check_buffered_window(70, 0, 13).empty());
+    CHECK(!pk::check_buffered_window(-1, 7, 7).empty());
+    CHECK(!pk::check_buffered_window(70, 7, -1).empty());
+    CHECK(!pk::check_buffered_window(0, -5, 0).empty());
+
+    // Refused: one step over the total limit (4001 frames), and each part over it.
+    CHECK(!pk::check_buffered_window(2000, 1000, 1001).empty());
+    CHECK(!pk::check_buffered_window(0, 4001, 0).empty());
+    CHECK(!pk::check_buffered_window(4001, 1, 0).empty());
+    CHECK(!pk::check_buffered_window(0, 1, 4001).empty());
+
+    // Overflow-sized values, as the C API (int fields) and the CLI (64-bit frames) can pass.
+    const int64_t kI32 = 2147483647LL;
+    CHECK(!pk::check_buffered_window(kI32, kI32, kI32).empty());
+    CHECK(!pk::check_buffered_window(kI32, 1, kI32).empty());
+    CHECK(!pk::check_buffered_window(0, kI32, 0).empty());
+    CHECK(!pk::check_buffered_window(0, 1, kI32).empty());
+    const int64_t kI64 = 9223372036854775807LL;
+    CHECK(!pk::check_buffered_window(kI64, kI64, kI64).empty());
+    CHECK(!pk::check_buffered_window(kI64, 1, 0).empty());
+    CHECK(!pk::check_buffered_window(0, kI64, 0).empty());
+    CHECK(!pk::check_buffered_window(0, 1, kI64).empty());
+    CHECK(!pk::check_buffered_window(-kI64, 1, 0).empty());   // sum never formed: negative part refused
+    // The limit check sums in 64 bits: two large parts that fit each on their own do not wrap.
+    CHECK(!pk::check_buffered_window(kI64 / 2, kI64 / 2, kI64 / 2).empty());
+}
+
+// Schedule-level error paths, no model: zero-length input, sub-frame input, end of
+// stream with nothing left, and a finish after the last step.
+void test_schedule_edges() {
+    // Zero-length: no step, no finish.
+    {
+        pk::BufferedSchedule sch(70, 7, 7);
+        std::vector<pk::BufferedStepPlan> plans;
+        sch.advance(0, plans);
+        CHECK(plans.empty());
+        pk::BufferedStepPlan last;
+        CHECK(!sch.finish(0, last));
+        CHECK(!sch.done());
+        // A second end of stream on an empty schedule is still a no-op.
+        CHECK(!sch.finish(0, last));
+    }
+    // Sub-frame input (less than one 80 ms frame, 1279 samples): no step, and finish gives one last step.
+    {
+        pk::BufferedSchedule sch(70, 7, 7);
+        std::vector<pk::BufferedStepPlan> plans;
+        sch.advance(1279, plans);
+        CHECK(plans.empty());
+        pk::BufferedStepPlan last;
+        CHECK(sch.finish(1279, last));
+        CHECK(last.is_last && last.edge == 1279 && last.num == 1279);
+        CHECK(sch.done());
+    }
+    // After the last step the schedule is done: finish and advance add nothing.
+    {
+        pk::BufferedSchedule sch(70, 7, 7);
+        std::vector<pk::BufferedStepPlan> plans;
+        sch.advance(50000, plans);
+        pk::BufferedStepPlan last;
+        CHECK(sch.finish(50000, last));
+        CHECK(sch.done());
+        const size_t before = plans.size();
+        sch.advance(60000, plans);
+        CHECK(plans.size() == before);
+        CHECK(!sch.finish(60000, last));
+    }
+}
+
 }  // namespace
 
 int main() {
     test_text_delta();
     test_failure_latch();
+    test_window_bounds();
+    test_schedule_edges();
 
     if (failures == 0) std::printf("test_buffered_session_pure: all checks passed\n");
     return failures ? 1 : 0;

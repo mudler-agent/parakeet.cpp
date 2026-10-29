@@ -582,7 +582,7 @@ typedef struct parakeet_stream_opts {
     int preset;               /* PARAKEET_STREAM_PRESET_DEFAULT, PARAKEET_STREAM_PRESET_CUSTOM, or an index in parakeet_capi_stream_presets_json */
     int left_frames;          /* PARAKEET_STREAM_PRESET_CUSTOM only: left context, 80 ms frames (>= 0) */
     int chunk_frames;         /*   chunk, 80 ms frames (>= 1) */
-    int right_frames;         /*   right context, 80 ms frames (>= 0) */
+    int right_frames;         /*   right context, 80 ms frames (>= 0); left + chunk + right <= 4000 (320 s) */
     int flags;                /* reserved: 0 */
 } parakeet_stream_opts;
 

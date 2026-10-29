@@ -1262,10 +1262,6 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_opts(parakeet_ctx* ctx,
             L = o->left_frames;
             C = o->chunk_frames;
             R = o->right_frames;
-            if (L < 0 || C < 1 || R < 0) {
-                ctx->last_error = "stream window needs left >= 0, chunk >= 1 and right >= 0 (80 ms frames)";
-                return nullptr;
-            }
         } else {
             const int index = (o->preset == PARAKEET_STREAM_PRESET_DEFAULT)
                                   ? (int)cfg.unified.default_preset : o->preset;
@@ -1273,6 +1269,10 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_opts(parakeet_ctx* ctx,
                 ctx->last_error = "stream preset index is out of range (see parakeet_capi_stream_presets_json)";
                 return nullptr;
             }
+        }
+        if (const std::string why = pk::check_buffered_window(L, C, R); !why.empty()) {
+            ctx->last_error = why;
+            return nullptr;
         }
         return begin_buffered(ctx, L, C, R, lang);
     }

@@ -1331,12 +1331,9 @@ extern "C" char* parakeet_capi_stream_presets_json(parakeet_ctx* ctx) {
         for (uint32_t i = 0; i < n; ++i) {
             int L = 0, C = 0, R = 0;
             unified_preset(cfg, (int)i, L, C, R);
-            char buf[192];
-            std::snprintf(buf, sizeof buf,
-                          "%s{\"preset\":%u,\"left\":%d,\"chunk\":%d,\"right\":%d,\"latency_sec\":%.2f,\"default\":%s}",
-                          i ? "," : "", i, L, C, R, (C + R) * frame_sec_of(cfg),
-                          i == cfg.unified.default_preset ? "true" : "false");
-            out += buf;
+            if (i) out += ",";
+            out += pk::buffered_preset_json(i, L, C, R, frame_sec_of(cfg),
+                                            i == cfg.unified.default_preset);
         }
     }
     out += "]";
@@ -1349,19 +1346,15 @@ extern "C" char* parakeet_capi_stream_presets_json(parakeet_ctx* ctx) {
 extern "C" char* parakeet_capi_stream_info_json(parakeet_stream* s) {
     if (!s || !s->ctx || !s->ctx->model) return nullptr;
     const double fs = frame_sec_of(s->ctx->model->config());
-    char buf[400];
+    std::string json;
     if (s->buf) {
-        const int L = s->buf->left_frames(), C = s->buf->chunk_frames(), R = s->buf->right_frames();
-        std::snprintf(buf, sizeof buf,
-                      "{\"kind\":\"buffered\",\"left\":%d,\"chunk\":%d,\"right\":%d,\"frame_sec\":%.6f,"
-                      "\"latency_sec\":%.6f,\"step_sec\":%.6f,\"first_step_samples\":%lld,\"step_samples\":%lld}",
-                      L, C, R, fs, (C + R) * fs, C * fs,
-                      (long long)(C + R) * 1280, (long long)C * 1280);
+        json = pk::buffered_info_json(s->buf->left_frames(), s->buf->chunk_frames(),
+                                      s->buf->right_frames(), fs);
     } else {
-        std::snprintf(buf, sizeof buf, "{\"kind\":\"cache_aware\",\"frame_sec\":%.6f}", fs);
+        json = "{\"kind\":\"cache_aware\",\"frame_sec\":" + pk::format_fixed(fs, 6) + "}";
     }
     s->ctx->last_error.clear();
-    return dup_to_c(buf);
+    return dup_to_c(json);
 }
 
 extern "C" int parakeet_capi_stream_reset(parakeet_stream* s) {

@@ -87,6 +87,17 @@ private:
     bool failed_ = false;
 };
 
+// Decimal number with `precision` fraction digits and '.' as the separator, whatever
+// the C locale's LC_NUMERIC is (printf-style %f follows it, so JSON built with it can
+// read "1,12" on a comma-decimal locale).
+std::string format_fixed(double v, int precision);
+
+// The JSON of a buffered stream's info (parakeet_capi_stream_info_json) and of one
+// preset (parakeet_capi_stream_presets_json). Locale-independent. Windows in 80 ms frames.
+std::string buffered_info_json(int left, int chunk, int right, double frame_sec);
+std::string buffered_preset_json(unsigned index, int left, int chunk, int right,
+                                 double frame_sec, bool is_default);
+
 // Newly emitted bytes of `current` (the full transcript) after the bytes already
 // emitted, which are kept in `emitted` and extended by the returned delta. Pure, no model.
 //   * When `emitted` is no longer a prefix of `current` (the transcript was revised

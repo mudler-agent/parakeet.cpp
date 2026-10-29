@@ -2,7 +2,11 @@
 #include "tokenizer.hpp"
 
 #include <algorithm>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace pk {
 
@@ -256,6 +260,33 @@ size_t utf8_complete_end(const std::string& s, size_t from) {
 }
 
 } // namespace
+
+std::string format_fixed(double v, int precision) {
+    std::ostringstream os;
+    os.imbue(std::locale::classic());
+    os << std::fixed << std::setprecision(precision) << v;
+    return os.str();
+}
+
+std::string buffered_info_json(int left, int chunk, int right, double frame_sec) {
+    const int64_t first = ((int64_t)chunk + right) * kFrameSamples;
+    const int64_t step = (int64_t)chunk * kFrameSamples;
+    return "{\"kind\":\"buffered\",\"left\":" + std::to_string(left) +
+           ",\"chunk\":" + std::to_string(chunk) + ",\"right\":" + std::to_string(right) +
+           ",\"frame_sec\":" + format_fixed(frame_sec, 6) +
+           ",\"latency_sec\":" + format_fixed((chunk + right) * frame_sec, 6) +
+           ",\"step_sec\":" + format_fixed(chunk * frame_sec, 6) +
+           ",\"first_step_samples\":" + std::to_string(first) +
+           ",\"step_samples\":" + std::to_string(step) + "}";
+}
+
+std::string buffered_preset_json(unsigned index, int left, int chunk, int right,
+                                 double frame_sec, bool is_default) {
+    return "{\"preset\":" + std::to_string(index) + ",\"left\":" + std::to_string(left) +
+           ",\"chunk\":" + std::to_string(chunk) + ",\"right\":" + std::to_string(right) +
+           ",\"latency_sec\":" + format_fixed((chunk + right) * frame_sec, 2) +
+           ",\"default\":" + (is_default ? "true" : "false") + "}";
+}
 
 std::string take_text_delta(std::string& emitted, const std::string& current, bool flush) {
     size_t k = 0;   // length of the common prefix of emitted and current

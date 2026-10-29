@@ -91,6 +91,7 @@ pk_add_test(test_capi_stream_unified) # C-API v11 buffered streams: feed sizes, 
 pk_add_test(test_unified_synthetic)  # CPU-only, no checkpoint: runs everywhere
 pk_add_test(test_buffered_schedule)  # CPU-only: buffered streaming steps vs NeMo loop, feed-size invariance
 pk_add_test(test_buffered_session_pure)  # CPU-only: text delta, UTF-8 hold-back, failure latch, window checks
+pk_add_test(test_buffered_locale)  # CPU-only: buffered stream JSON numbers independent of LC_NUMERIC (skips without a comma locale)
 pk_add_test(test_rc_mask)           # CPU-only: window-relative RC mask vs NeMo fixture
 set_tests_properties(test_rc_mask PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 pk_add_test(test_transcribe_vad)

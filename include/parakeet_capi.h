@@ -458,8 +458,10 @@ void parakeet_capi_free_logits(float* logits);
 // model) must outlive the stream. Free with parakeet_capi_stream_free.
 typedef struct parakeet_stream parakeet_stream;
 
-// Begin a streaming session over `ctx`'s model. Returns NULL on failure (e.g.
-// the model is not a cache-aware streaming model) and sets the ctx last error.
+// Begin a streaming session over `ctx`'s model. A cache-aware model starts a
+// cache-aware stream; a unified model (see parakeet_capi_stream_kind) starts a
+// buffered stream on the default window. Returns NULL only for a model that
+// supports neither, and sets the ctx last error.
 parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
 
 // Begin a streaming session selecting the language prompt for multilingual

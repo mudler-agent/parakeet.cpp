@@ -8,8 +8,8 @@
 //                                   prompt_kernel_out [T,D], rnnt_token_ids,
 //                                   baseline.rnnt_text, baseline.target_lang)
 //   PARAKEET_TEST_UNIFIED_WAV       clip used for the baseline (default tests/fixtures/speech.wav)
-// Also checks the loader's unified fields, and that the stream_* C-API refuses
-// the model instead of running it as a cache-aware stream.
+// Also checks the loader's unified fields, and that the stream_* C-API opens a
+// buffered stream on the model (not a cache-aware stream).
 #include "model.hpp"
 #include "model_loader.hpp"
 #include "backend.hpp"
@@ -140,16 +140,21 @@ int main() {
         CHECK(m->transcribe_with_timestamps(std::vector<float>(), 16000, pk::Decoder::kDefault, lang).text.empty());
     }
 
-    // ---- stage 5: stream_* must refuse the unified model, with a reason ----
+    // ---- stage 5: stream_* runs the unified model as a buffered stream ----
+    // The stream kind is BUFFERED (re-encode a window per step), and stream_begin
+    // returns a live stream on the default window. Its text is checked by
+    // test_capi_stream_unified, not here.
     parakeet_ctx* ctx = parakeet_capi_load(gguf);
     CHECK(ctx != nullptr);
     if (ctx) {
+        CHECK(parakeet_capi_stream_kind(ctx) == PARAKEET_STREAM_KIND_BUFFERED);
         parakeet_stream* s = parakeet_capi_stream_begin_lang(ctx, nullptr);
-        CHECK(s == nullptr);
-        const char* err = parakeet_capi_last_error(ctx);
-        std::string e = err ? err : "";
-        std::fprintf(stderr, "[capi] stream_begin error: %s\n", e.c_str());
-        CHECK(e.find("buffered streaming") != std::string::npos);
+        CHECK(s != nullptr);
+        if (!s) {
+            const char* err = parakeet_capi_last_error(ctx);
+            std::fprintf(stderr, "[capi] stream_begin error: %s\n", err ? err : "");
+        }
+        if (s) parakeet_capi_stream_free(s);
         parakeet_capi_free(ctx);
     }
 

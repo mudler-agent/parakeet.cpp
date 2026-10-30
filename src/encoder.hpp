@@ -1,5 +1,6 @@
 #pragma once
 #include "model_loader.hpp"
+#include "relpos_attention.hpp"
 #include <vector>
 namespace pk {
 
@@ -65,7 +66,21 @@ public:
                          const std::vector<int>& capture_layers,
                          std::vector<std::vector<float>>& layer_outs) const;
 
+    // Buffered-streaming window (unified checkpoints, NeMo chunked_limited_with_rc):
+    // same as forward() but with full attention under the window-relative RcMask
+    // (see relpos_attention.hpp). `mel` is the window's log-mel [n_mels, T],
+    // trimmed to its valid frame count. Output layout is the same as forward().
+    void forward_rc(const std::vector<float>& mel, int n_mels, int T, const RcMask& rc,
+                    std::vector<float>& enc_out, int& d_model, int& Tout) const;
+
 private:
+    // Shared body of forward_capture and forward_rc. `rc` (nullable) selects the
+    // window-relative mask and forces full attention.
+    void forward_impl(const std::vector<float>& mel, int n_mels, int T, const RcMask* rc,
+                      std::vector<float>& enc_out, int& d_model, int& Tout,
+                      const std::vector<int>& capture_layers,
+                      std::vector<std::vector<float>>& layer_outs) const;
+
     // Mirrors forward_batch's post-subsampling body (xscaling + positional
     // encoding + conformer stack + per-item channels-first split) for the tiled
     // path, but takes the already-subsampled features `x0_host` ([d_model, Tp, B]

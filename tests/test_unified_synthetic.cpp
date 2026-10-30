@@ -6,7 +6,11 @@
 //   - the gate off (and a non-unified style): T == 1 + S/hop, as before;
 //   - StreamingMel / StreamingEncoder throw (not abort) on a per_feature or a
 //     non-streaming config;
-//   - a unified GGUF with a KV of the wrong type is refused at load, not aborted.
+//   - a unified GGUF with a KV of the wrong type is refused at load, not aborted;
+//   - a buffered window out of bounds (negative, zero chunk, over 4000 frames, values
+//     near INT_MAX) is refused by BufferedStreamingSession and by the C-API stream begin,
+//     before any weight is read.
+#include "buffered_streaming.hpp"
 #include "model_loader.hpp"
 #include "mel.hpp"
 #include "mel_gpu.hpp"
@@ -17,10 +21,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include "parakeet_capi.h"
 
 #include "ggml.h"
 #include "gguf.h"
@@ -292,6 +299,56 @@ int main() {
             const float f[3] = {70.0f, 7.0f, 7.0f};
             gguf_set_arr_data(g, "parakeet.unified.presets", GGUF_TYPE_FLOAT32, f, 3);
         }));
+    }
+
+    // ---- buffered window bounds: refused before any weight is read ----
+    {
+        ModelLoader ml;
+        CHECK(load_spec(Spec{}, "window_ctor", ml));
+        auto refused = [&](int L, int C, int R) {
+            try {
+                BufferedStreamingSession sess(ml, L, C, R);
+            } catch (const std::invalid_argument&) {
+                return true;
+            } catch (...) {
+            }
+            return false;
+        };
+        CHECK(refused(-1, 7, 7));
+        CHECK(refused(70, 0, 13));
+        CHECK(refused(0, 4001, 0));
+        CHECK(refused(2147483647, 2147483647, 2147483647));
+    }
+    {
+        TempFile tf("window_capi");
+        CHECK(write_gguf(tf.path, Spec{}));
+        parakeet_ctx* ctx = parakeet_capi_load(tf.path.c_str());
+        CHECK(ctx != nullptr);
+        if (ctx) {
+            // {L, C, R, the message must contain}: the total limit or the minimum sizes.
+            struct Case { int L, C, R; const char* want; };
+            const Case cases[] = {
+                {0, 0, 0, "left >= 0, chunk >= 1"},
+                {-1, 7, 7, "left >= 0, chunk >= 1"},
+                {0, 4001, 0, "4000 frames"},
+                {2147483647, 2147483647, 2147483647, "4000 frames"},
+                {2147483647, 1, 0, "4000 frames"},
+            };
+            for (const Case& c : cases) {
+                parakeet_stream_opts o;
+                parakeet_capi_stream_opts_default(&o);
+                o.preset = PARAKEET_STREAM_PRESET_CUSTOM;
+                o.left_frames = c.L;
+                o.chunk_frames = c.C;
+                o.right_frames = c.R;
+                parakeet_stream* st = parakeet_capi_stream_begin_opts(ctx, &o);
+                CHECK(st == nullptr);
+                const char* err = parakeet_capi_last_error(ctx);
+                CHECK(err != nullptr && std::strstr(err, c.want) != nullptr);
+                if (st) parakeet_capi_stream_free(st);
+            }
+            parakeet_capi_free(ctx);
+        }
     }
 
     if (failures) {

@@ -86,7 +86,14 @@ pk_add_test(test_transcribe_eou)
 pk_add_test(test_transcribe_nemotron)
 pk_add_test(test_unified_offline)
 pk_add_test(test_unified_load_negative)
+pk_add_test(test_unified_stream)     # buffered streaming vs NeMo (PARAKEET_TEST_BASELINE_UNIFIED_STREAM)
+pk_add_test(test_capi_stream_unified) # C-API v11 buffered streams: feed sizes, presets, refusals (PARAKEET_TEST_GGUF_UNIFIED)
 pk_add_test(test_unified_synthetic)  # CPU-only, no checkpoint: runs everywhere
+pk_add_test(test_buffered_schedule)  # CPU-only: buffered streaming steps vs NeMo loop, feed-size invariance
+pk_add_test(test_buffered_session_pure)  # CPU-only: text delta, UTF-8 hold-back, failure latch, window checks
+pk_add_test(test_buffered_locale)  # CPU-only: buffered stream JSON numbers independent of LC_NUMERIC (skips without a comma locale)
+pk_add_test(test_rc_mask)           # CPU-only: window-relative RC mask vs NeMo fixture
+set_tests_properties(test_rc_mask PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 pk_add_test(test_transcribe_vad)
 pk_add_test(test_vad_batched)
 pk_add_test(test_streaming_decode)
@@ -211,7 +218,7 @@ set_tests_properties(test_model_loader test_mel test_mel_gpu test_subsampling te
 set_tests_properties(test_ternary_model test_ternary_long test_fivevalue_model test_fivevalue_gpu test_decoder_reuse test_transcribe_vad test_vad_batched test_vad_head test_model_loader_ternary
                      test_ternary_load_negative test_capi_vad PROPERTIES LABELS "model")
 # Unified (chunked_limited_with_rc) checkpoint: offline parity and loader gate.
-set_tests_properties(test_unified_offline test_unified_load_negative
+set_tests_properties(test_unified_offline test_unified_load_negative test_unified_stream test_capi_stream_unified
                      PROPERTIES LABELS "model" WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 # These tests read fixtures/baselines via paths relative to the project root.
 set_tests_properties(test_mel test_mel_gpu test_subsampling test_subsampling_batch test_subsampling_batch_causal test_relpos_attention test_relpos_attention_batch test_conformer test_conformer_batch

@@ -81,6 +81,14 @@ typedef struct parakeet_ctx parakeet_ctx;
 // Speaker embedding output (parakeet_capi_speaker_embed_pcm, parakeet_capi_free_floats)
 //      is additive and keeps ABI v10: a caller that needs them checks for the symbols
 //      (dlsym).
+// v11: buffered streaming for unified checkpoints (chunked_limited_with_rc). The
+//      stream_* calls now accept such a model and run a buffered stream with the
+//      default window, so stream_begin no longer refuses it. New, additive: the
+//      stream kind/caps queries, parakeet_stream_opts with parakeet_capi_stream_begin_opts,
+//      parakeet_capi_stream_presets_json, parakeet_capi_stream_info_json and
+//      parakeet_capi_stream_reset. Callers that stream cache-aware models see no
+//      change, but a caller that relied on stream_begin failing for a unified model
+//      must check parakeet_capi_stream_kind == PARAKEET_STREAM_KIND_BUFFERED.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -450,8 +458,10 @@ void parakeet_capi_free_logits(float* logits);
 // model) must outlive the stream. Free with parakeet_capi_stream_free.
 typedef struct parakeet_stream parakeet_stream;
 
-// Begin a streaming session over `ctx`'s model. Returns NULL on failure (e.g.
-// the model is not a cache-aware streaming model) and sets the ctx last error.
+// Begin a streaming session over `ctx`'s model. A cache-aware model starts a
+// cache-aware stream; a unified model (see parakeet_capi_stream_kind) starts a
+// buffered stream on the default window. Returns NULL only for a model that
+// supports neither, and sets the ctx last error.
 parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx);
 
 // Begin a streaming session selecting the language prompt for multilingual
@@ -543,6 +553,63 @@ char* parakeet_capi_stream_finalize_json(parakeet_stream* s);
 
 // Free a streaming session. Safe on NULL.
 void parakeet_capi_stream_free(parakeet_stream* s);
+
+// --- Buffered streaming (ABI v11, additive for the calls above) -------------
+// A unified checkpoint (att_context_style chunked_limited_with_rc, e.g.
+// nvidia/nemotron-labs-unified-asr-0.6b) streams by re-encoding a window of
+// audio at each step: the window is [left | chunk | right] in 80 ms frames.
+// Committed tokens are final. A buffered stream never raises <EOU>/<EOB>, so
+// its "eou"/"eob" flags and events stay 0. The stream_* calls above work for
+// both kinds: parakeet_capi_stream_begin / _begin_lang use the default window
+// on a buffered model. Use parakeet_capi_stream_begin_opts to pick another
+// window (any preset, or custom frames), or the language.
+//
+// Kinds and capabilities of a context. Kind NONE: the model has no streaming.
+#define PARAKEET_STREAM_KIND_NONE        0  /* offline-only model */
+#define PARAKEET_STREAM_KIND_CACHE_AWARE 1  /* cache-aware RNN-T (EOU model, nemotron-3.5) */
+#define PARAKEET_STREAM_KIND_BUFFERED    2  /* buffered re-encode (unified checkpoints) */
+int parakeet_capi_stream_kind(const parakeet_ctx* ctx);
+
+#define PARAKEET_STREAM_CAP_EOU_EVENTS 1    /* a stream of this context can raise <EOU>/<EOB> */
+int parakeet_capi_stream_caps(const parakeet_ctx* ctx);
+
+// Options for parakeet_capi_stream_begin_opts. Fill with
+// parakeet_capi_stream_opts_default and change fields. `size` must be
+// sizeof(parakeet_stream_opts); a different value makes begin fail.
+#define PARAKEET_STREAM_PRESET_DEFAULT (-1)  /* the model's default window */
+#define PARAKEET_STREAM_PRESET_CUSTOM  (-2)  /* use left_frames / chunk_frames / right_frames */
+typedef struct parakeet_stream_opts {
+    int size;                 /* sizeof(parakeet_stream_opts) */
+    const char* target_lang;  /* NULL or "": the model's default language */
+    int preset;               /* PARAKEET_STREAM_PRESET_DEFAULT, PARAKEET_STREAM_PRESET_CUSTOM, or an index in parakeet_capi_stream_presets_json */
+    int left_frames;          /* PARAKEET_STREAM_PRESET_CUSTOM only: left context, 80 ms frames (>= 0) */
+    int chunk_frames;         /*   chunk, 80 ms frames (>= 1) */
+    int right_frames;         /*   right context, 80 ms frames (>= 0); left + chunk + right <= 4000 (320 s) */
+    int flags;                /* reserved: 0 */
+} parakeet_stream_opts;
+
+void parakeet_capi_stream_opts_default(parakeet_stream_opts* o);
+
+// Begin a stream with explicit options. NULL on error (see parakeet_capi_last_error).
+// A cache-aware model accepts only the default preset and language.
+parakeet_stream* parakeet_capi_stream_begin_opts(parakeet_ctx* ctx,
+                                                 const parakeet_stream_opts* o);
+
+// The windows of a buffered model as JSON, malloc'd (free with
+// parakeet_capi_free_string). Each entry:
+//   {"preset":0,"left":70,"chunk":7,"right":7,"latency_sec":1.12,"default":true}
+// latency_sec is (chunk + right) * 0.08. "[]" for a model with no presets.
+char* parakeet_capi_stream_presets_json(parakeet_ctx* ctx);
+
+// The stream's kind and window as JSON, malloc'd. Buffered:
+//   {"kind":"buffered","left":70,"chunk":7,"right":7,"frame_sec":0.08,
+//    "latency_sec":1.12,"step_sec":0.56,"first_step_samples":17920,"step_samples":8960}
+// Cache-aware: {"kind":"cache_aware","frame_sec":0.08}.
+char* parakeet_capi_stream_info_json(parakeet_stream* s);
+
+// Start a new utterance on the same stream: clears the audio, the decoder state
+// and the text, and keeps the window and language. Returns 0, or -1 on error.
+int parakeet_capi_stream_reset(parakeet_stream* s);
 
 // Free a string previously returned by parakeet_capi_transcribe_* /
 // parakeet_capi_stream_* / parakeet_capi_diarize_* /

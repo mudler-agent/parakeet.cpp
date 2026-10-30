@@ -32,7 +32,7 @@ int main() {
     const char* vd_path = std::getenv("PARAKEET_TEST_VD_GGUF");
     if (!diar_path || !vd_path) return 77;
 
-    CHECK(parakeet_capi_abi_version() == 10);
+    CHECK(parakeet_capi_abi_version() == 11);
 
     parakeet_ctx* spk = parakeet_capi_load(vd_path);
     if (!spk) { std::fprintf(stderr, "FAIL: load speaker model (built without voice-detect?)\n"); return 77; }

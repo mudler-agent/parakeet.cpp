@@ -1,6 +1,7 @@
 #pragma once
 #include "model_loader.hpp"
 #include "graph_builder.hpp"
+#include "relpos_attention.hpp"
 #include <string>
 #include <vector>
 
@@ -59,20 +60,26 @@ public:
     // rel_pos_local_attn (banded, O(T*window)): `pe` must then be the LOCAL
     // positional encoding [d_model, att_left+att_right+1]. Defaults (-1, -1) keep
     // full attention with `pe` = [d_model, 2T-1].
+    // `rc` (non-null) applies the window-relative chunked-limited attention mask
+    // (see RcMask in relpos_attention.hpp) to self-attention. It needs full
+    // attention, so it must not be combined with att_left/att_right >= 0.
     ggml_tensor* build_graph(ggml_context* ctx, ggml_tensor* xt, int T,
                              ggml_tensor* pe, int pos_len, int valid_len,
                              GraphInputPool& pool,
-                             int att_left = -1, int att_right = -1) const;
+                             int att_left = -1, int att_right = -1,
+                             const RcMask* rc = nullptr) const;
 
     // Batched GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is [D, pos_len] (shared
     // across the batch). `valid_len` is per item (size B). Returns [D, T, B].
     // att_left/att_right >= 0 routes self-attention to banded local attention
     // (pe = LOCAL [d_model, att_left+att_right+1]); defaults (-1,-1) = full.
+    // `rc` as in build_graph.
     ggml_tensor* build_graph_batched(ggml_context* ctx, ggml_tensor* xt, int T,
                                      int B, ggml_tensor* pe, int pos_len,
                                      const std::vector<int>& valid_len,
                                      GraphInputPool& pool,
-                                     int att_left = -1, int att_right = -1) const;
+                                     int att_left = -1, int att_right = -1,
+                                     const RcMask* rc = nullptr) const;
 
     // x: [T, d_model]; pos_emb: [pos_len=2T-1, d_model]; out: [T, d_model].
     void forward(const std::vector<float>& x, int T,

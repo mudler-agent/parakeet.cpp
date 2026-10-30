@@ -4,6 +4,7 @@
 #include "diarization.hpp" // pk::DiarizationModel
 #include "diarization_streaming.hpp" // pk::StreamingDiarization
 #include "streaming.hpp"  // pk::StreamingSession
+#include "buffered_streaming.hpp" // pk::BufferedStreamingSession (unified checkpoints)
 #include "ced_tagger.hpp" // pk::CedTagger
 #include "sound_stream.hpp" // pk::SoundStream
 #include "mel.hpp"        // pk::MelFrontend
@@ -70,7 +71,7 @@
 //      callers that keep speaker embeddings themselves, and diarization with
 //      speaker names and no ASR model (parakeet_capi_diarize_named_pcm_json);
 //      additive.
-#define PARAKEET_CAPI_ABI_VERSION 10
+#define PARAKEET_CAPI_ABI_VERSION 11
 
 // The last error message of a context. Every write takes a lock, so several
 // threads can fail on one context at once (concurrent requests on a pooled
@@ -156,6 +157,9 @@ struct parakeet_stream {
     int mel_buffer_idx = 0;                  // next un-fed mel frame (chunk schedule)
     bool first_chunk = true;                 // chunk 0 has no pre-encode overlap
     bool finalized = false;
+    // Buffered streams (unified checkpoints, ABI v11): when set, the cache-aware
+    // members above stay unused and every stream_* call takes this path.
+    std::unique_ptr<pk::BufferedStreamingSession> buf;
 };
 
 namespace {
@@ -1173,27 +1177,113 @@ std::string feed_available(parakeet_stream* s, bool flush, int& eou_flag,
 
 } // namespace
 
-extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
-                                                           const char* target_lang) {
+namespace {
+
+// Frame stride of a model in seconds (hop * subsampling / sample rate).
+double frame_sec_of(const pk::ParakeetConfig& cfg) {
+    const double sub = cfg.subsampling_factor ? (double)cfg.subsampling_factor : 1.0;
+    const double sr = cfg.sample_rate ? (double)cfg.sample_rate : 16000.0;
+    return (double)cfg.hop_length * sub / sr;
+}
+
+// Window of preset `index` of a buffered model, in 80 ms frames.
+bool unified_preset(const pk::ParakeetConfig& cfg, int index, int& L, int& C, int& R) {
+    if (index < 0 || (uint32_t)index >= cfg.unified.num_presets()) return false;
+    L = cfg.unified.presets[3 * (size_t)index];
+    C = cfg.unified.presets[3 * (size_t)index + 1];
+    R = cfg.unified.presets[3 * (size_t)index + 2];
+    return true;
+}
+
+// A buffered stream (unified model) with window L/C/R, in frames.
+parakeet_stream* begin_buffered(parakeet_ctx* ctx, int L, int C, int R, const std::string& lang) {
+    try {
+        std::unique_ptr<parakeet_stream> s(new (std::nothrow) parakeet_stream());
+        if (!s) { ctx->last_error = "out of memory"; return nullptr; }
+        s->ctx = ctx;
+        s->buf = std::make_unique<pk::BufferedStreamingSession>(ctx->model->loader(), L, C, R, lang);
+        ctx->last_error.clear();
+        return s.release();
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return nullptr;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return nullptr;
+    }
+}
+
+} // namespace
+
+extern "C" void parakeet_capi_stream_opts_default(parakeet_stream_opts* o) {
+    if (!o) return;
+    o->size = (int)sizeof(parakeet_stream_opts);
+    o->target_lang = nullptr;
+    o->preset = PARAKEET_STREAM_PRESET_DEFAULT;
+    o->left_frames = 0;
+    o->chunk_frames = 0;
+    o->right_frames = 0;
+    o->flags = 0;
+}
+
+extern "C" int parakeet_capi_stream_kind(const parakeet_ctx* ctx) {
+    if (!ctx || !ctx->model) return PARAKEET_STREAM_KIND_NONE;
+    const pk::ParakeetConfig& cfg = ctx->model->config();
+    if (cfg.unified.present) return PARAKEET_STREAM_KIND_BUFFERED;
+    if (cfg.streaming.present) return PARAKEET_STREAM_KIND_CACHE_AWARE;
+    return PARAKEET_STREAM_KIND_NONE;
+}
+
+extern "C" int parakeet_capi_stream_caps(const parakeet_ctx* ctx) {
+    return parakeet_capi_stream_kind(ctx) == PARAKEET_STREAM_KIND_CACHE_AWARE
+               ? PARAKEET_STREAM_CAP_EOU_EVENTS : 0;
+}
+
+extern "C" parakeet_stream* parakeet_capi_stream_begin_opts(parakeet_ctx* ctx,
+                                                           const parakeet_stream_opts* o) {
     if (!ctx) return nullptr;
+    if (!o || o->size != (int)sizeof(parakeet_stream_opts)) {
+        ctx->last_error = "parakeet_stream_opts is NULL or has the wrong size: fill it with "
+                          "parakeet_capi_stream_opts_default";
+        return nullptr;
+    }
     if (!ctx->model) {
         ctx->last_error = ctx->diar
             ? "context holds a diarization model; use parakeet_capi_diarize_*"
             : no_model_msg(ctx);
         return nullptr;
     }
-    if (ctx->model->config().unified.present) {
-        // Unified checkpoints run offline only until the buffered streaming driver lands.
-        ctx->last_error = "unified (chunked_limited_with_rc) model: buffered streaming is not "
-                          "available yet; use offline transcription";
+    // NULL / "" -> model default language (ignored by non-prompt models).
+    const std::string lang = o->target_lang ? o->target_lang : "";
+    const pk::ParakeetConfig& cfg = ctx->model->config();
+    if (cfg.unified.present) {
+        int L = 0, C = 0, R = 0;
+        if (o->preset == PARAKEET_STREAM_PRESET_CUSTOM) {
+            L = o->left_frames;
+            C = o->chunk_frames;
+            R = o->right_frames;
+        } else {
+            const int index = (o->preset == PARAKEET_STREAM_PRESET_DEFAULT)
+                                  ? (int)cfg.unified.default_preset : o->preset;
+            if (!unified_preset(cfg, index, L, C, R)) {
+                ctx->last_error = "stream preset index is out of range (see parakeet_capi_stream_presets_json)";
+                return nullptr;
+            }
+        }
+        if (const std::string why = pk::check_buffered_window(L, C, R); !why.empty()) {
+            ctx->last_error = why;
+            return nullptr;
+        }
+        return begin_buffered(ctx, L, C, R, lang);
+    }
+    if (o->preset != PARAKEET_STREAM_PRESET_DEFAULT) {
+        ctx->last_error = "this model's stream has no presets: use PARAKEET_STREAM_PRESET_DEFAULT";
         return nullptr;
     }
-    if (!ctx->model->config().streaming.present) {
+    if (!cfg.streaming.present) {
         ctx->last_error = "model is not a cache-aware streaming model";
         return nullptr;
     }
-    // NULL / "" -> model default language (ignored by non-prompt models).
-    const std::string lang = target_lang ? target_lang : "";
     try {
         // Held by unique_ptr until every member is built: a throw in the
         // constructors below must not leak the stream.
@@ -1214,9 +1304,84 @@ extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
     }
 }
 
+extern "C" parakeet_stream* parakeet_capi_stream_begin_lang(parakeet_ctx* ctx,
+                                                           const char* target_lang) {
+    // The model's default window; target_lang NULL or "" = the model default language.
+    parakeet_stream_opts o;
+    parakeet_capi_stream_opts_default(&o);
+    o.target_lang = target_lang;
+    return parakeet_capi_stream_begin_opts(ctx, &o);
+}
+
 extern "C" parakeet_stream* parakeet_capi_stream_begin(parakeet_ctx* ctx) {
     // Delegate with the model default language.
     return parakeet_capi_stream_begin_lang(ctx, nullptr);
+}
+
+extern "C" char* parakeet_capi_stream_presets_json(parakeet_ctx* ctx) {
+    if (!ctx) return nullptr;
+    if (!ctx->model) {
+        ctx->last_error = no_model_msg(ctx);
+        return nullptr;
+    }
+    const pk::ParakeetConfig& cfg = ctx->model->config();
+    std::string out = "[";
+    if (cfg.unified.present) {
+        const uint32_t n = cfg.unified.num_presets();
+        for (uint32_t i = 0; i < n; ++i) {
+            int L = 0, C = 0, R = 0;
+            unified_preset(cfg, (int)i, L, C, R);
+            if (i) out += ",";
+            out += pk::buffered_preset_json(i, L, C, R, frame_sec_of(cfg),
+                                            i == cfg.unified.default_preset);
+        }
+    }
+    out += "]";
+    ctx->last_error.clear();
+    char* r = dup_to_c(out);
+    if (!r) ctx->last_error = "out of memory";
+    return r;
+}
+
+extern "C" char* parakeet_capi_stream_info_json(parakeet_stream* s) {
+    if (!s || !s->ctx || !s->ctx->model) return nullptr;
+    const double fs = frame_sec_of(s->ctx->model->config());
+    std::string json;
+    if (s->buf) {
+        json = pk::buffered_info_json(s->buf->left_frames(), s->buf->chunk_frames(),
+                                      s->buf->right_frames(), fs);
+    } else {
+        json = "{\"kind\":\"cache_aware\",\"frame_sec\":" + pk::format_fixed(fs, 6) + "}";
+    }
+    s->ctx->last_error.clear();
+    return dup_to_c(json);
+}
+
+extern "C" int parakeet_capi_stream_reset(parakeet_stream* s) {
+    if (!s || !s->ctx) return -1;
+    try {
+        if (s->buf) {
+            s->buf->reset();
+        } else {
+            if (!s->sess || !s->mel) { s->ctx->last_error = "stream is not initialised"; return -1; }
+            s->sess->reset();
+            s->mel->reset();
+            s->mel_buf.clear();
+            s->mel_T = 0;
+            s->mel_buf_origin = 0;
+            s->mel_buffer_idx = 0;
+            s->first_chunk = true;
+            s->finalized = false;
+        }
+        s->ctx->last_error.clear();
+        return 0;
+    } catch (const std::exception& e) {
+        s->ctx->last_error = e.what();
+        return -1;
+    } catch (...) {
+        s->ctx->last_error = "unknown error";
+        return -1;
+    }
 }
 
 extern "C" char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
@@ -1229,6 +1394,14 @@ extern "C" char* parakeet_capi_stream_feed(parakeet_stream* s, const float* pcm,
         return nullptr;
     }
     try {
+        if (s->buf) {
+            s->buf->feed(pcm, n_samples);
+            std::string delta = s->buf->take_new_text();
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(delta);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         // Incremental, frame-local mel for the just-arrived PCM (no full-buffer
         // recompute). StreamingMel carries the preemph history + partial frame
         // across feeds; the emitted frames are appended to the accumulated mel.
@@ -1258,6 +1431,15 @@ extern "C" char* parakeet_capi_stream_finalize(parakeet_stream* s) {
     if (!s) return nullptr;
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
+        if (s->buf) {
+            s->buf->finalize();
+            std::string delta = s->buf->take_new_text();
+            s->finalized = true;
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(delta);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         // Emit the end zero-pad tail frames so the accumulated mel matches the
         // full-buffer MelFrontend::compute exactly, then flush the decoder tail.
         if (s->mel) {
@@ -1288,6 +1470,10 @@ extern "C" int parakeet_capi_stream_drain_events(parakeet_stream* s,
                                                  parakeet_stream_event** out_events) {
     if (out_events) *out_events = nullptr;
     if (!s || !out_events) return -1;
+    if (s->buf) {  // a buffered stream never raises <EOU>/<EOB>
+        s->ctx->last_error.clear();
+        return 0;
+    }
     if (!s->ctx || !s->ctx->model || !s->sess) return -1;
     try {
         std::vector<pk::EouEvent> evs = s->sess->drain_events();
@@ -1385,6 +1571,16 @@ extern "C" char* parakeet_capi_stream_feed_json(parakeet_stream* s,
         return nullptr;
     }
     try {
+        if (s->buf) {
+            s->buf->feed(pcm, n_samples);
+            std::string delta = s->buf->take_new_text();
+            std::vector<pk::Word> words = s->buf->drain_words();
+            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), {}, words);
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(json);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         if (n_samples > 0) {
             int n_new = 0;
             std::vector<float> frames = s->mel->feed(pcm, n_samples, n_new);
@@ -1412,6 +1608,17 @@ extern "C" char* parakeet_capi_stream_finalize_json(parakeet_stream* s) {
     if (!s) return nullptr;
     if (!s->ctx || !s->ctx->model) return nullptr;
     try {
+        if (s->buf) {
+            s->buf->finalize();
+            std::string delta = s->buf->take_new_text();
+            std::vector<pk::Word> words = s->buf->drain_words();
+            s->finalized = true;
+            std::string json = stream_json(delta, 0, 0, stream_frame_sec(s), {}, words);
+            s->ctx->last_error.clear();
+            char* out = dup_to_c(json);
+            if (!out) { s->ctx->last_error = "out of memory"; return nullptr; }
+            return out;
+        }
         if (s->mel) {
             int n_tail = 0;
             std::vector<float> tail = s->mel->finalize(n_tail);

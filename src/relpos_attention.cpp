@@ -64,11 +64,31 @@ RelPosAttention::RelPosAttention(const ModelLoader& ml, int layer_idx)
     att_right_ = ml.config().att_context_right;
 }
 
+void build_rc_mask(float* md, int T, int valid_len, const RcMask& rc) {
+    const int chunk = rc.chunk;
+    const float ninf = -INFINITY;
+    for (int qi = 0; qi < T; ++qi) {
+        float* row = md + (size_t)qi * T;
+        if (qi >= valid_len) {  // dead (padded) query row: see RelPosAttention::build_graph
+            for (int kj = 0; kj < T; ++kj) row[kj] = 0.0f;
+            continue;
+        }
+        const int cs = (qi / chunk) * chunk;                        // chunk start (window frame)
+        const int ws = std::max(0, cs - rc.left);                    // NeMo window_start
+        const int we = std::min(T - 1, cs + chunk - 1 + rc.right);   // NeMo window_end
+        for (int kj = 0; kj < T; ++kj) {
+            const bool ok = kj < valid_len && kj >= ws && kj <= we;
+            row[kj] = ok ? 0.0f : ninf;
+        }
+    }
+}
+
 ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
                                           int T, ggml_tensor* pe, int pos_len,
                                           int valid_len,
                                           GraphInputPool& pool,
-                                          int att_left, int att_right) const {
+                                          int att_left, int att_right,
+                                          const RcMask* rc) const {
     // Scalar (B=1) builder: the verbatim v1 2-D/3D relative-position attention
     // graph. The single-clip conformer layer routes here so B=1 runs the lean
     // graph and is bit-exact with v1. build_graph_batched below serves B>1.
@@ -141,7 +161,9 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
     std::vector<float>& mask_host = pool.alloc_f32((size_t)T * T);
-    {
+    if (rc) {
+        build_rc_mask(mask_host.data(), T, valid_len, *rc);
+    } else {
         float* md = mask_host.data();
         const float ninf = -INFINITY;
         for (int qi = 0; qi < T; ++qi) {
@@ -199,7 +221,7 @@ ggml_tensor* RelPosAttention::build_graph(ggml_context* ctx, ggml_tensor* xt,
 ggml_tensor* RelPosAttention::build_graph_batched(
         ggml_context* ctx, ggml_tensor* xt, int T, int B, ggml_tensor* pe,
         int pos_len, const std::vector<int>& valid_len,
-        GraphInputPool& pool) const {
+        GraphInputPool& pool, const RcMask* rc) const {
     const int D  = d_model_;
     const int H  = n_heads_;
     const int dk = d_head_;
@@ -291,7 +313,10 @@ ggml_tensor* RelPosAttention::build_graph_batched(
     const int left_chunks = (chunked_limited_ && chunk_size > 0)
                             ? (att_left_ / chunk_size) : 0;
     std::vector<float>& mask_host = pool.alloc_f32((size_t)B * T * T);
-    {
+    if (rc) {
+        for (int b = 0; b < B; ++b)
+            build_rc_mask(mask_host.data() + (size_t)b * T * T, T, valid_len[b], *rc);
+    } else {
         float* md = mask_host.data();
         const float ninf = -INFINITY;
         for (int b = 0; b < B; ++b) {

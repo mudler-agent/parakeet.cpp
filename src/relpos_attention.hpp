@@ -8,6 +8,30 @@ struct ggml_tensor;
 
 namespace pk {
 
+// Window-relative chunked-limited attention (NeMo att_context_style
+// "chunked_limited_with_rc", the unified checkpoints). The frame grid is counted
+// from the first frame of the window that is passed to the encoder, not from
+// the start of a stream. Used by the buffered streaming driver only; offline
+// inference uses full attention and passes no RcMask.
+//   left, chunk, right: frames (80 ms each). chunk >= 1.
+// Frame i (chunk index q = i / chunk) may see key j iff
+//   max(0, q*chunk - left) <= j <= min(T-1, q*chunk + chunk - 1 + right).
+// The grid is NOT re-aligned to the left context, so with left = 70 and chunk =
+// 13 the windows of later chunks do not start on a chunk boundary. NeMo does
+// the same (conformer_encoder.py _create_masks); do not "fix" it.
+struct RcMask {
+    int left = 0;
+    int chunk = 1;
+    int right = 0;
+};
+
+// Fill the additive [T, T] mask (row = query qi, col = key kj, row-major, the
+// same layout as the graph mask): 0 where visible, -INFINITY otherwise. Keys
+// kj >= valid_len are never visible (pad mask). Padded query rows (qi >=
+// valid_len) are left unmasked (0), as in RelPosAttention::build_graph, so the
+// softmax never sees an all-masked row; their output is zeroed by the query mask.
+void build_rc_mask(float* md, int T, int valid_len, const RcMask& rc);
+
 // Relative-position multi-head self-attention (Transformer-XL style) as used by
 // the FastConformer encoder — NeMo RelPositionMultiHeadAttention.
 //
@@ -41,10 +65,15 @@ public:
     // When att_left/att_right >= 0, an additional SYMMETRIC sliding-window mask
     // is applied: query qi may attend to key kj only if -att_left <= qi-kj <=
     // att_right (NeMo rel_pos_local_attn). Defaults (-1, -1) = full context.
+    //
+    // When `rc` is non-null the window-relative chunked-limited mask (RcMask) is
+    // used instead of the full context. It applies to full attention only, so
+    // the caller must not combine it with att_left/att_right >= 0.
     ggml_tensor* build_graph(ggml_context* ctx, ggml_tensor* xt, int T,
                              ggml_tensor* pe, int pos_len, int valid_len,
                              GraphInputPool& pool,
-                             int att_left = -1, int att_right = -1) const;
+                             int att_left = -1, int att_right = -1,
+                             const RcMask* rc = nullptr) const;
 
     // LOCAL (banded / Longformer) GRAPH-BUILDER. Appends NeMo rel_pos_local_attn
     // ops to a SHARED graph. `xt` is [D, T] and `pe` is the LOCAL positional
@@ -58,10 +87,12 @@ public:
 
     // Batched GRAPH-BUILDER. `xt` is [D, T, B]; `pe` is [D, pos_len] (shared
     // across the batch). `valid_len` is per item (size B). Returns [D, T, B].
+    // `rc` as in build_graph: each item gets the same window-relative mask.
     ggml_tensor* build_graph_batched(ggml_context* ctx, ggml_tensor* xt, int T,
                                      int B, ggml_tensor* pe, int pos_len,
                                      const std::vector<int>& valid_len,
-                                     GraphInputPool& pool) const;
+                                     GraphInputPool& pool,
+                                     const RcMask* rc = nullptr) const;
 
     // Batched LOCAL (banded / Longformer) GRAPH-BUILDER. Same as
     // build_graph_local but for B>1: `xt` is [D, T, B], `pe` is the LOCAL
